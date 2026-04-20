@@ -36,7 +36,7 @@ The llama.cpp server must already be running on `http://127.0.0.1:8080` before s
 All logic lives in `bot.py`:
 
 - **`stream_llama(messages)`** — async generator that POSTs to the llama.cpp `/v1/chat/completions` SSE endpoint and yields token strings.
-- **`handle_message()`** — core handler: appends user turn to per-chat `histories[chat_id]`, sends a cursor placeholder, then consumes `stream_llama` tokens and edits the placeholder every `EDIT_INTERVAL` seconds (2 s, safe under Telegram rate limits). Full accumulated text is stored back into history.
+- **`handle_message()`** — core handler: appends user turn to per-chat `histories[chat_id]`, sends a cursor placeholder, then consumes `stream_llama` tokens and edits the placeholder every `EDIT_INTERVAL` seconds (2 s, safe under Telegram rate limits). When the current message exceeds `MAX_MSG_LEN`, it is finalized at a clean break (paragraph/line/sentence/word via `split_point`) and streaming continues in a freshly sent message. Full accumulated text is stored back into history.
 - **`histories`** — in-memory `dict[int, list[dict]]` keyed by `chat_id`; each value is a standard OpenAI-format message list starting with the system prompt. Cleared on `/start` or `/clear`.
 - **`safe_edit()`** — wraps `message.edit_text` to absorb `RetryAfter` (sleeps then retries) and `BadRequest: message is not modified` (ignored).
 
@@ -46,5 +46,5 @@ All logic lives in `bot.py`:
 LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
 MODEL = "gemma4"
 EDIT_INTERVAL = 2.0   # seconds between edits
-MAX_MSG_LEN = 4000    # truncates display to last 4000 chars if response is long
+MAX_MSG_LEN = 4000    # per-message cap; long responses spill into additional messages
 ```
