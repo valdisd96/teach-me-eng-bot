@@ -23,6 +23,11 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant running on a Raspberry Pi.")
+# Comma- or whitespace-separated Telegram user IDs allowed to talk to the bot.
+# Empty/unset means no restriction (all users allowed).
+ALLOWED_USER_IDS: set[int] = {
+    int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace(",", " ").split() if x.strip()
+}
 LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
 MODEL = "gemma4"
 CURSOR = "▌"
@@ -41,6 +46,20 @@ histories: dict[int, list[dict]] = {}
 
 def fresh_history() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
+
+
+def is_allowed(update: Update) -> bool:
+    if not ALLOWED_USER_IDS:
+        return True
+    user = update.effective_user
+    if user is None or user.id not in ALLOWED_USER_IDS:
+        log.warning(
+            "Rejected message from unauthorized user id=%s username=%s",
+            getattr(user, "id", None),
+            getattr(user, "username", None),
+        )
+        return False
+    return True
 
 
 def sys_footer() -> str:
@@ -121,6 +140,9 @@ def split_point(text: str, max_len: int) -> int:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+
     chat_id = update.effective_chat.id
     user_text = update.message.text.strip()
 
@@ -173,6 +195,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
     chat_id = update.effective_chat.id
     histories[chat_id] = fresh_history()
     await update.message.reply_text(
@@ -184,11 +208,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
     histories[update.effective_chat.id] = fresh_history()
     await update.message.reply_text("Conversation cleared.")
 
 
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get("http://127.0.0.1:8080/health")

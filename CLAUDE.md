@@ -30,6 +30,7 @@ The llama.cpp server must already be running on `http://127.0.0.1:8080` before s
 |---|---|---|
 | `TELEGRAM_TOKEN` | Yes | — |
 | `SYSTEM_PROMPT` | No | `"You are a helpful assistant running on a Raspberry Pi."` |
+| `ALLOWED_USER_IDS` | No | empty (allow all) — comma/whitespace-separated Telegram user IDs; if set, other users are silently ignored and logged |
 
 ## Architecture
 
