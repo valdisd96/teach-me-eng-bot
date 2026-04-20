@@ -43,6 +43,16 @@ def fresh_history() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
+def sys_footer() -> str:
+    load1, load5, load15 = os.getloadavg()
+    try:
+        temp_mc = int(open("/sys/class/thermal/thermal_zone0/temp").read())
+        temp_str = f"{temp_mc / 1000:.1f}°C"
+    except OSError:
+        temp_str = "n/a"
+    return f"\n\n`load {load1:.2f} {load5:.2f} {load15:.2f} | {temp_str}`"
+
+
 async def stream_llama(messages: list[dict]):
     """Async-stream token chunks from the llama.cpp OpenAI-compatible endpoint."""
     async with httpx.AsyncClient(timeout=180) as client:
@@ -120,9 +130,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await safe_edit(sent, accumulated or f"⚠️ Error: {e}")
         return
 
-    # Final message without cursor
+    # Final message without cursor, with system stats appended
+    footer = sys_footer()
     display = accumulated[-MAX_MSG_LEN:] if len(accumulated) > MAX_MSG_LEN else accumulated
-    await safe_edit(sent, display or "⚠️ No response from model.")
+    await safe_edit(sent, (display or "⚠️ No response from model.") + footer)
 
     histories[chat_id].append({"role": "assistant", "content": accumulated})
 
