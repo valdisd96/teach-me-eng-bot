@@ -1,0 +1,17 @@
+[Unit]
+Description=Gemma 4 Raspberry Pi Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/gemma-rpi-agent
+EnvironmentFile=/root/gemma-rpi-agent/.env
+ExecStart=/root/gemma-rpi-agent/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
