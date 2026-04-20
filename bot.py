@@ -27,7 +27,7 @@ LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
 MODEL = "gemma4"
 CURSOR = "▌"
 EDIT_INTERVAL = 2.0   # seconds between Telegram message edits (rate-limit safe)
-MAX_MSG_LEN = 4000    # Telegram hard limit is 4096
+MAX_MSG_LEN = 4000    # Telegram hard limit is 4096; responses past this spill into new messages
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
@@ -95,6 +95,31 @@ async def safe_edit(message, text: str) -> None:
             raise
 
 
+async def safe_send(bot, chat_id: int, text: str):
+    """Send a new Telegram message, retrying once on RetryAfter."""
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text)
+    except RetryAfter as e:
+        await asyncio.sleep(e.retry_after + 0.5)
+        return await bot.send_message(chat_id=chat_id, text=text)
+
+
+def split_point(text: str, max_len: int) -> int:
+    """Return an index to split `text` so the head fits within `max_len`.
+
+    Prefers paragraph > line > sentence > word boundaries in the upper half of
+    the window, falling back to a hard cut at `max_len` if none are found.
+    """
+    if len(text) <= max_len:
+        return len(text)
+    floor = max_len // 2
+    for sep, offset in (("\n\n", 2), ("\n", 1), (". ", 2), ("! ", 2), ("? ", 2), (" ", 1)):
+        idx = text.rfind(sep, floor, max_len)
+        if idx != -1:
+            return idx + offset
+    return max_len
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_text = update.message.text.strip()
@@ -107,33 +132,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     histories[chat_id].append({"role": "user", "content": user_text})
 
-    # Send placeholder so we have a message to edit
-    sent = await update.message.reply_text(CURSOR)
-
-    accumulated = ""
+    # First message is a reply to the user; continuation messages go to the chat directly.
+    current_msg = await update.message.reply_text(CURSOR)
+    current_page = ""      # text rendered in current_msg
+    accumulated = ""       # full response (for history)
     last_edit = asyncio.get_event_loop().time()
 
     try:
         async for token in stream_llama(histories[chat_id]):
             accumulated += token
+            current_page += token
 
-            # Truncate if approaching Telegram's limit
-            display = accumulated[-MAX_MSG_LEN:] if len(accumulated) > MAX_MSG_LEN else accumulated
+            while len(current_page) > MAX_MSG_LEN:
+                idx = split_point(current_page, MAX_MSG_LEN)
+                head, current_page = current_page[:idx], current_page[idx:]
+                await safe_edit(current_msg, head)
+                current_msg = await safe_send(context.bot, chat_id, current_page + CURSOR)
+                last_edit = asyncio.get_event_loop().time()
 
             now = asyncio.get_event_loop().time()
             if now - last_edit >= EDIT_INTERVAL:
-                await safe_edit(sent, display + CURSOR)
+                await safe_edit(current_msg, current_page + CURSOR)
                 last_edit = now
 
     except Exception as e:
         log.error("Streaming error: %s", e)
-        await safe_edit(sent, accumulated or f"⚠️ Error: {e}")
+        await safe_edit(current_msg, current_page or f"⚠️ Error: {e}")
         return
 
-    # Final message without cursor, with system stats appended
+    # Final page without cursor, with system stats appended (spill footer if needed)
     footer = sys_footer()
-    display = accumulated[-MAX_MSG_LEN:] if len(accumulated) > MAX_MSG_LEN else accumulated
-    await safe_edit(sent, (display or "⚠️ No response from model.") + footer)
+    final_text = current_page or "⚠️ No response from model."
+    if len(final_text) + len(footer) > MAX_MSG_LEN:
+        await safe_edit(current_msg, final_text)
+        await safe_send(context.bot, chat_id, footer.lstrip())
+    else:
+        await safe_edit(current_msg, final_text + footer)
 
     histories[chat_id].append({"role": "assistant", "content": accumulated})
 
