@@ -2,9 +2,12 @@
 """Gemma 4 Telegram bot with live-streaming message edits."""
 
 import asyncio
+import datetime
 import json
 import logging
 import os
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
@@ -34,18 +37,57 @@ CURSOR = "▌"
 EDIT_INTERVAL = 2.0   # seconds between Telegram message edits (rate-limit safe)
 MAX_MSG_LEN = 4000    # Telegram hard limit is 4096; responses past this spill into new messages
 
+LOGS_DIR = Path(__file__).resolve().parent / "logs"
+CONVS_DIR = LOGS_DIR / "convs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+CONVS_DIR.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        RotatingFileHandler(
+            LOGS_DIR / "bot.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
+    ],
 )
+# httpx/telegram INFO logs leak the bot token in request URLs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # Per-chat conversation history stored in memory
 histories: dict[int, list[dict]] = {}
+# Per-chat path of the active transcript file (rotated on /start and /clear).
+conv_paths: dict[int, Path] = {}
 
 
 def fresh_history() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
+
+
+def start_conversation(chat_id: int) -> Path:
+    """Open a fresh transcript file for this chat and register it as active."""
+    chat_dir = CONVS_DIR / str(chat_id)
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    existing = [int(p.stem) for p in chat_dir.glob("*.txt") if p.stem.isdigit()]
+    path = chat_dir / f"{max(existing, default=0) + 1:03d}.txt"
+    path.touch()
+    conv_paths[chat_id] = path
+    log.info("New conversation file for chat %s: %s", chat_id, path)
+    return path
+
+
+def append_turn(chat_id: int, role: str, content: str) -> None:
+    """Append one turn to the chat's active transcript, creating it on demand."""
+    path = conv_paths.get(chat_id) or start_conversation(chat_id)
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"[{ts}] {role}: {content}\n\n")
 
 
 def is_allowed(update: Update) -> bool:
@@ -151,8 +193,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if chat_id not in histories:
         histories[chat_id] = fresh_history()
+        start_conversation(chat_id)
 
     histories[chat_id].append({"role": "user", "content": user_text})
+    append_turn(chat_id, "user", user_text)
 
     # First message is a reply to the user; continuation messages go to the chat directly.
     current_msg = await update.message.reply_text(CURSOR)
@@ -179,6 +223,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     except Exception as e:
         log.error("Streaming error: %s", e)
+        append_turn(chat_id, "error", f"{type(e).__name__}: {e}")
         await safe_edit(current_msg, current_page or f"⚠️ Error: {e}")
         return
 
@@ -192,6 +237,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await safe_edit(current_msg, final_text + footer)
 
     histories[chat_id].append({"role": "assistant", "content": accumulated})
+    append_turn(chat_id, "assistant", accumulated)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -199,6 +245,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     histories[chat_id] = fresh_history()
+    start_conversation(chat_id)
     await update.message.reply_text(
         "👋 Gemma 4 bot is ready.\n\n"
         "Just send a message to chat. Responses stream live.\n\n"
@@ -210,7 +257,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
-    histories[update.effective_chat.id] = fresh_history()
+    chat_id = update.effective_chat.id
+    histories[chat_id] = fresh_history()
+    start_conversation(chat_id)
     await update.message.reply_text("Conversation cleared.")
 
 
