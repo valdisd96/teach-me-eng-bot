@@ -40,6 +40,13 @@ All logic lives in `bot.py`:
 - **`handle_message()`** — core handler: appends user turn to per-chat `histories[chat_id]`, sends a cursor placeholder, then consumes `stream_llama` tokens and edits the placeholder every `EDIT_INTERVAL` seconds (2 s, safe under Telegram rate limits). When the current message exceeds `MAX_MSG_LEN`, it is finalized at a clean break (paragraph/line/sentence/word via `split_point`) and streaming continues in a freshly sent message. Full accumulated text is stored back into history.
 - **`histories`** — in-memory `dict[int, list[dict]]` keyed by `chat_id`; each value is a standard OpenAI-format message list starting with the system prompt. Cleared on `/start` or `/clear`.
 - **`safe_edit()`** — wraps `message.edit_text` to absorb `RetryAfter` (sleeps then retries) and `BadRequest: message is not modified` (ignored).
+- **`start_conversation()` / `append_turn()`** — manage per-chat transcript files under `logs/convs/<chat_id>/NNN.txt`. A new file is opened on the first message from a chat and on every `/start` or `/clear`; each turn is appended as `[YYYY-MM-DD HH:MM:SS] role: content` with a blank line between turns.
+
+## Logs on disk
+
+- `logs/bot.log` — rotating file log (5 MB × 5 backups), mirrors journald output. `httpx`/`telegram` loggers are pinned to WARNING so the bot token no longer appears in request URLs.
+- `logs/convs/<chat_id>/NNN.txt` — human-readable transcript, one file per conversation, zero-padded sequential numbering per chat.
+- `logs/` is git-ignored.
 
 ## Key constants (top of `bot.py`)
 
