@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS words (
     stability      REAL,
     difficulty     REAL,
     state          INTEGER NOT NULL DEFAULT 0,
+    step           INTEGER,
     due            TEXT,
     reps           INTEGER NOT NULL DEFAULT 0,
     lapses         INTEGER NOT NULL DEFAULT 0,
@@ -66,6 +67,16 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables if they don't exist. Safe to call on every startup."""
+    """Create tables if they don't exist. Safe to call on every startup.
+
+    Also applies small forward-only migrations for columns added after the
+    initial schema — keeps existing on-disk dbs usable.
+    """
     conn.executescript(SCHEMA)
+    if "step" not in _column_names(conn, "words"):
+        conn.execute("ALTER TABLE words ADD COLUMN step INTEGER")
