@@ -1,41 +1,70 @@
 #!/usr/bin/env python3
-"""Gemma 4 Telegram bot with live-streaming message edits."""
+"""Gemma 4 Telegram bot — streaming chat + FSRS-driven vocab agent.
+
+Split responsibilities:
+  * llm.py           — llama.cpp client (stream + one-shot + health)
+  * vocab.py         — vocabulary CRUD, FSRS rating, weighted selection
+  * prompts.py       — tone templates + just-talk system prompt composer
+  * config_flow.py   — /start state machine for per-chat settings
+  * scheduler.py     — push planning, compose, log, APScheduler wrapper
+  * db.py            — SQLite schema and connection
+
+This file wires them to python-telegram-bot: commands, callbacks, plain-text
+handling, and scheduler bootstrap.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import datetime
 import logging
 import os
+import random
+import sqlite3
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.error import RetryAfter, BadRequest
+from fsrs import Rating
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 from telegram.request import HTTPXRequest
 
+import config_flow
+import db as db_module
 import llm
+import prompts
+import scheduler as sched_module
+import vocab
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant running on a Raspberry Pi.")
+SYSTEM_PROMPT = os.getenv(
+    "SYSTEM_PROMPT", "You are a helpful assistant running on a Raspberry Pi."
+)
 # Comma- or whitespace-separated Telegram user IDs allowed to talk to the bot.
 # Empty/unset means no restriction (all users allowed).
 ALLOWED_USER_IDS: set[int] = {
-    int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace(",", " ").split() if x.strip()
+    int(x)
+    for x in os.getenv("ALLOWED_USER_IDS", "").replace(",", " ").split()
+    if x.strip()
 }
+
 CURSOR = "▌"
 EDIT_INTERVAL = 2.0   # seconds between Telegram message edits (rate-limit safe)
 MAX_MSG_LEN = 4000    # Telegram hard limit is 4096; responses past this spill into new messages
 
-LOGS_DIR = Path(__file__).resolve().parent / "logs"
+ROOT = Path(__file__).resolve().parent
+LOGS_DIR = ROOT / "logs"
 CONVS_DIR = LOGS_DIR / "convs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 CONVS_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,16 +85,32 @@ logging.basicConfig(
 # httpx/telegram INFO logs leak the bot token in request URLs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
-# Per-chat conversation history stored in memory
+# --- Mutable module state (set in main / post_init) --------------------------
+
+# Database connection is opened in main() and reused by every handler + the
+# scheduler. sqlite3.connect is called with check_same_thread=False because
+# APScheduler's AsyncIOScheduler fires jobs in the same asyncio loop thread as
+# PTB, but also schedules them from threaded setup; see db.connect().
+conn: sqlite3.Connection | None = None
+runner: sched_module.PushRunner | None = None
+app: Application | None = None
+
+# Per-chat conversation history stored in memory (system + user + assistant).
 histories: dict[int, list[dict]] = {}
 # Per-chat path of the active transcript file (rotated on /start and /clear).
 conv_paths: dict[int, Path] = {}
+# Chats currently walking the /start config steps.
+sessions: dict[int, config_flow.ConfigSession] = {}
 
 
-def fresh_history() -> list[dict]:
-    return [{"role": "system", "content": SYSTEM_PROMPT}]
+# --- transcript + access helpers --------------------------------------------
+
+
+def fresh_history(system_prompt: str = SYSTEM_PROMPT) -> list[dict]:
+    return [{"role": "system", "content": system_prompt}]
 
 
 def start_conversation(chat_id: int) -> Path:
@@ -112,6 +157,9 @@ def sys_footer() -> str:
     return f"\n\n`load {load1:.2f} {load5:.2f} {load15:.2f} | {temp_str}`"
 
 
+# --- telegram send helpers --------------------------------------------------
+
+
 async def safe_edit(message, text: str) -> None:
     """Edit a Telegram message, handling rate-limit and no-change errors."""
     try:
@@ -134,11 +182,7 @@ async def safe_send(bot, chat_id: int, text: str):
 
 
 def split_point(text: str, max_len: int) -> int:
-    """Return an index to split `text` so the head fits within `max_len`.
-
-    Prefers paragraph > line > sentence > word boundaries in the upper half of
-    the window, falling back to a hard cut at `max_len` if none are found.
-    """
+    """Return an index to split `text` so the head fits within `max_len`."""
     if len(text) <= max_len:
         return len(text)
     floor = max_len // 2
@@ -149,77 +193,58 @@ def split_point(text: str, max_len: int) -> int:
     return max_len
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update):
-        return
+# --- push dispatch (called by the scheduler) --------------------------------
 
-    chat_id = update.effective_chat.id
-    user_text = update.message.text.strip()
 
-    if not user_text:
-        return
-
-    if chat_id not in histories:
-        histories[chat_id] = fresh_history()
-        start_conversation(chat_id)
-
-    histories[chat_id].append({"role": "user", "content": user_text})
-    append_turn(chat_id, "user", user_text)
-
-    # First message is a reply to the user; continuation messages go to the chat directly.
-    current_msg = await update.message.reply_text(CURSOR)
-    current_page = ""      # text rendered in current_msg
-    accumulated = ""       # full response (for history)
-    last_edit = asyncio.get_event_loop().time()
-
+async def dispatch_push(chat_id: int) -> None:
+    """Compose a scheduled push and send it with rating buttons."""
+    assert conn is not None and app is not None
     try:
-        async for token in llm.stream_chat(histories[chat_id]):
-            accumulated += token
-            current_page += token
-
-            while len(current_page) > MAX_MSG_LEN:
-                idx = split_point(current_page, MAX_MSG_LEN)
-                head, current_page = current_page[:idx], current_page[idx:]
-                await safe_edit(current_msg, head)
-                current_msg = await safe_send(context.bot, chat_id, current_page + CURSOR)
-                last_edit = asyncio.get_event_loop().time()
-
-            now = asyncio.get_event_loop().time()
-            if now - last_edit >= EDIT_INTERVAL:
-                await safe_edit(current_msg, current_page + CURSOR)
-                last_edit = now
-
-    except Exception as e:
-        log.error("Streaming error: %s", e)
-        append_turn(chat_id, "error", f"{type(e).__name__}: {e}")
-        await safe_edit(current_msg, current_page or f"⚠️ Error: {e}")
+        composed = await sched_module.compose_push(
+            conn, chat_id, llm_chat=llm.chat, rng=random.Random()
+        )
+    except Exception as e:  # noqa: BLE001 — never let a push crash the scheduler
+        log.error("compose_push failed for chat %s: %s", chat_id, e)
         return
+    if composed is None:
+        log.info("No push for chat %s (no vocab or chat missing)", chat_id)
+        return
+    word_id, word, text = composed
 
-    # Final page without cursor, with system stats appended (spill footer if needed)
-    footer = sys_footer()
-    final_text = current_page or "⚠️ No response from model."
-    if len(final_text) + len(footer) > MAX_MSG_LEN:
-        await safe_edit(current_msg, final_text)
-        await safe_send(context.bot, chat_id, footer.lstrip())
-    else:
-        await safe_edit(current_msg, final_text + footer)
+    # Insert push_log first so the callback_data can reference a real push id;
+    # update tg_message_id after the Telegram send returns.
+    push_id = sched_module.log_push(conn, chat_id, tg_message_id=None, word_ids=[word_id])
+    kb = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                "✅ knew", callback_data=f"rate:good:{push_id}:{word_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ forgot", callback_data=f"rate:again:{push_id}:{word_id}"
+            ),
+        ]]
+    )
+    try:
+        msg = await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+        conn.execute(
+            "UPDATE push_log SET tg_message_id = ? WHERE id = ?",
+            (msg.message_id, push_id),
+        )
+        append_turn(chat_id, "push", f"[{word}] {text}")
+    except Exception as e:  # noqa: BLE001
+        log.error("Failed to send push to chat %s: %s", chat_id, e)
 
-    histories[chat_id].append({"role": "assistant", "content": accumulated})
-    append_turn(chat_id, "assistant", accumulated)
+
+# --- command handlers -------------------------------------------------------
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
     chat_id = update.effective_chat.id
-    histories[chat_id] = fresh_history()
-    start_conversation(chat_id)
-    await update.message.reply_text(
-        "👋 Gemma 4 bot is ready.\n\n"
-        "Just send a message to chat. Responses stream live.\n\n"
-        "/clear — reset conversation\n"
-        "/model — show model info"
-    )
+    session = config_flow.ConfigSession()
+    sessions[chat_id] = session
+    await update.message.reply_text(session.first_prompt())
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -242,13 +267,284 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    text = " ".join(context.args or []).strip()
+    if not text:
+        await update.message.reply_text("Usage: /add <word or phrase>")
+        return
+    try:
+        added = vocab.add_word(conn, chat_id, text)
+    except ValueError as e:
+        await update.message.reply_text(f"⚠️ {e}")
+        return
+    normalized = text.strip().lower()
+    if added:
+        await update.message.reply_text(f"➕ Added: {normalized}")
+    else:
+        await update.message.reply_text(f"Already in your vocab: {normalized}")
+
+
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    text = " ".join(context.args or []).strip()
+    if not text:
+        await update.message.reply_text("Usage: /remove <word or phrase>")
+        return
+    removed = vocab.remove_word(conn, chat_id, text)
+    normalized = text.strip().lower()
+    if removed:
+        await update.message.reply_text(f"➖ Removed: {normalized}")
+    else:
+        await update.message.reply_text(f"Not found: {normalized}")
+
+
+async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    needle = " ".join(context.args or []).strip() or None
+    rows = vocab.list_words(conn, chat_id, contains=needle)
+    if not rows:
+        msg = (
+            f"No words matching '{needle}'."
+            if needle
+            else "Your vocab is empty. Add words with /add <word>."
+        )
+        await update.message.reply_text(msg)
+        return
+    header = (
+        f"Vocab ({len(rows)})"
+        + (f" matching '{needle}'" if needle else "")
+        + ":"
+    )
+    lines = [f"• {r['text']} (seen {r['mention_count']}×)" for r in rows]
+    # Telegram message cap — truncate gracefully.
+    body = "\n".join(lines)
+    if len(body) > MAX_MSG_LEN - len(header) - 32:
+        body = body[: MAX_MSG_LEN - len(header) - 32] + "\n…"
+    await update.message.reply_text(f"{header}\n{body}")
+
+
+async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    kb = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("Yes, wipe", callback_data="rv:yes"),
+            InlineKeyboardButton("Cancel", callback_data="rv:no"),
+        ]]
+    )
+    await update.message.reply_text(
+        "Wipe all words for this chat? This cannot be undone.", reply_markup=kb
+    )
+
+
+# --- callback handlers ------------------------------------------------------
+
+
+async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, verdict, push_id_s, word_id_s = query.data.split(":")
+        push_id, word_id = int(push_id_s), int(word_id_s)
+    except (ValueError, AttributeError):
+        log.warning("Malformed rate callback: %r", query.data)
+        return
+    rating = Rating.Good if verdict == "good" else Rating.Again
+    try:
+        vocab.rate_word(conn, word_id, rating)
+    except KeyError:
+        log.warning("rate_word: unknown word_id %s", word_id)
+    sched_module.mark_rated(conn, push_id)
+    label = "✅ rated: knew" if rating == Rating.Good else "❌ rated: forgot"
+    try:
+        await query.edit_message_reply_markup(
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton(label, callback_data="noop")]]
+            )
+        )
+    except BadRequest:
+        pass  # message too old or already replaced
+
+
+async def on_resetvocab_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    if query.data == "rv:yes":
+        conn.execute("DELETE FROM words WHERE chat_id = ?", (chat_id,))
+        await query.edit_message_text("Vocab wiped.")
+    else:
+        await query.edit_message_text("Cancelled.")
+
+
+async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Already-rated button press — just acknowledge so the spinner clears.
+    if update.callback_query:
+        await update.callback_query.answer()
+
+
+# --- plain-text handler: config session OR just-talk ------------------------
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+
+    chat_id = update.effective_chat.id
+    user_text = update.message.text.strip()
+    if not user_text:
+        return
+
+    # Branch 1: user is mid-/start configuration.
+    session = sessions.get(chat_id)
+    if session is not None:
+        _, reply = session.submit(user_text)
+        if session.done:
+            settings = session.settings()
+            config_flow.save_settings(conn, chat_id, settings)
+            if runner is not None:
+                runner.schedule_chat(chat_id, settings)
+            sessions.pop(chat_id, None)
+            log.info("Config saved for chat %s: %s", chat_id, settings)
+        await update.message.reply_text(reply)
+        return
+
+    # Branch 2: just-talk. Inject vocab words into the system prompt so the
+    # model uses them when they fit naturally; scan the reply afterwards to
+    # bump mention_count.
+    vocab_rows = vocab.list_words(conn, chat_id)
+    word_texts = [r["text"] for r in vocab_rows]
+    system = prompts.just_talk_system(SYSTEM_PROMPT, word_texts)
+
+    if chat_id not in histories:
+        histories[chat_id] = fresh_history(system)
+        start_conversation(chat_id)
+    elif histories[chat_id] and histories[chat_id][0]["role"] == "system":
+        # Refresh system prompt every turn so new/removed words take effect.
+        histories[chat_id][0]["content"] = system
+
+    histories[chat_id].append({"role": "user", "content": user_text})
+    append_turn(chat_id, "user", user_text)
+
+    current_msg = await update.message.reply_text(CURSOR)
+    current_page = ""
+    accumulated = ""
+    last_edit = asyncio.get_event_loop().time()
+
+    try:
+        async for token in llm.stream_chat(histories[chat_id]):
+            accumulated += token
+            current_page += token
+
+            while len(current_page) > MAX_MSG_LEN:
+                idx = split_point(current_page, MAX_MSG_LEN)
+                head, current_page = current_page[:idx], current_page[idx:]
+                await safe_edit(current_msg, head)
+                current_msg = await safe_send(
+                    context.bot, chat_id, current_page + CURSOR
+                )
+                last_edit = asyncio.get_event_loop().time()
+
+            now = asyncio.get_event_loop().time()
+            if now - last_edit >= EDIT_INTERVAL:
+                await safe_edit(current_msg, current_page + CURSOR)
+                last_edit = now
+
+    except Exception as e:
+        log.error("Streaming error: %s", e)
+        append_turn(chat_id, "error", f"{type(e).__name__}: {e}")
+        await safe_edit(current_msg, current_page or f"⚠️ Error: {e}")
+        return
+
+    footer = sys_footer()
+    final_text = current_page or "⚠️ No response from model."
+    if len(final_text) + len(footer) > MAX_MSG_LEN:
+        await safe_edit(current_msg, final_text)
+        await safe_send(context.bot, chat_id, footer.lstrip())
+    else:
+        await safe_edit(current_msg, final_text + footer)
+
+    histories[chat_id].append({"role": "assistant", "content": accumulated})
+    append_turn(chat_id, "assistant", accumulated)
+
+    # Count any vocab words literally present in the reply.
+    id_pairs = [(r["id"], r["text"]) for r in vocab_rows]
+    mentioned = vocab.scan_mentions(accumulated, id_pairs)
+    if mentioned:
+        vocab.bump_mentions(conn, mentioned)
+
+
+# --- bootstrap --------------------------------------------------------------
+
+
+async def _post_init(application: Application) -> None:
+    """Start APScheduler and reschedule jobs for every known chat.
+
+    Called by PTB after the asyncio loop is running, so AsyncIOScheduler can
+    attach to it cleanly.
+    """
+    global runner
+    assert conn is not None
+    runner = sched_module.PushRunner(conn, dispatch=dispatch_push)
+    runner.start()
+    runner.refresh_all()
+    log.info("Scheduler started; refreshed jobs for all known chats.")
+
+
+async def _post_shutdown(application: Application) -> None:
+    if runner is not None:
+        runner.stop()
+
+
 def main() -> None:
+    global conn, app
+
+    conn = db_module.connect()
+    db_module.init_db(conn)
+
     request = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30)
-    app = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .request(request)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("add", cmd_add))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
+
+    app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
+    app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
+    app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     log.info("Bot started. Polling...")
     app.run_polling(drop_pending_updates=True)
 

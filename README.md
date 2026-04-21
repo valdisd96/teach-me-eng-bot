@@ -1,8 +1,8 @@
 # gemma-rpi-agent
 
-A Telegram bot that streams responses from a local **Gemma 4** model running via [llama.cpp](https://github.com/ggerganov/llama.cpp)'s OpenAI-compatible HTTP server on a Raspberry Pi.
+A Telegram bot that streams responses from a local **Gemma 4** model running via [llama.cpp](https://github.com/ggerganov/llama.cpp)'s OpenAI-compatible HTTP server on a Raspberry Pi, **plus an FSRS-driven English-vocabulary agent** that sends short tone-flavoured push messages using your saved words and tracks per-word memory state via rating buttons.
 
-Each reply is streamed live by repeatedly editing a placeholder Telegram message. The footer of every response shows current CPU load and temperature.
+Chat replies are streamed live by editing a placeholder message; the footer of each reply shows current CPU load and temperature. Scheduled pushes use a non-streaming one-shot call.
 
 ## Requirements
 
@@ -19,6 +19,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # then fill in TELEGRAM_TOKEN
 ```
+
+For running tests: `pip install -r requirements-dev.txt && python -m pytest -q`.
 
 ## Running manually
 
@@ -51,21 +53,26 @@ systemctl restart gemma-rpi-agent
 |---|---|---|
 | `TELEGRAM_TOKEN` | Yes | — |
 | `SYSTEM_PROMPT` | No | `"You are a helpful assistant running on a Raspberry Pi."` |
+| `ALLOWED_USER_IDS` | No | empty (allow all) |
+
+Per-chat scheduling settings (timezone, pushes/day, active window, tone) are collected via the `/start` flow and stored in SQLite at `data/vocab.db` — not via env vars.
 
 ## Bot commands
 
 | Command | Description |
 |---|---|
-| `/start` | Greet and reset conversation |
-| `/clear` | Reset conversation history |
-| `/model` | Show model name and llama.cpp server status |
+| `/start` | Walks a guided config: timezone → pushes/day (1–8) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed). Re-running overwrites settings; vocab is preserved. |
+| `/clear` | Resets the chat's LLM history. Vocab and settings untouched. |
+| `/add <word or phrase>` | Add a word to this chat's vocab. |
+| `/remove <word or phrase>` | Remove a word. |
+| `/list [substring]` | List vocab (least-mentioned first), optionally filtered by substring. |
+| `/resetvocab` | Wipe the chat's vocabulary (with a confirm button). |
+| `/model` | Show the llama.cpp endpoint and health status. |
+
+Plain-text messages go to the chat model with your vocab injected into the system prompt as soft hints. Words that appear literally in the reply bump their mention count.
+
+Scheduled pushes arrive inside your active window at randomized times. Each carries `✅ knew / ❌ forgot` buttons that apply FSRS `Good` or `Again` ratings to the highlighted word.
 
 ## Architecture
 
-All logic lives in `bot.py`:
-
-- **`stream_llama(messages)`** — async generator that POSTs to the llama.cpp `/v1/chat/completions` SSE endpoint and yields token strings.
-- **`handle_message()`** — appends user turn to per-chat history, sends a cursor placeholder, consumes tokens, and edits the placeholder every 2 s. Appends a system stats footer on the final edit.
-- **`safe_edit()`** — wraps `message.edit_text` to absorb `RetryAfter` and `BadRequest: message is not modified`.
-- **`sys_footer()`** — reads `os.getloadavg()` and `/sys/class/thermal/thermal_zone0/temp` to produce a live stats line.
-- **`histories`** — in-memory `dict[int, list[dict]]` keyed by `chat_id`; standard OpenAI message format. Cleared on `/start` or `/clear`.
+See [`CLAUDE.md`](CLAUDE.md) for the full module breakdown. Code is split into `bot.py` (Telegram wiring) plus dedicated modules for `llm`, `vocab`, `prompts`, `config_flow`, `scheduler`, and `db`. SQLite (`data/vocab.db`) holds per-chat settings, vocabulary + FSRS state, and push history.
