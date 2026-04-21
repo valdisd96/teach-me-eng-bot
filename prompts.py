@@ -1,0 +1,72 @@
+"""Prompt templates for scheduled pushes and just-talk replies.
+
+Pushes and chat replies share one style rule: answers should be at most 1–2
+short paragraphs. Push prompts additionally require the target vocab word to
+appear literally (used by the scheduler's retry-once check).
+"""
+
+from __future__ import annotations
+
+import random
+
+TONES: tuple[str, ...] = ("funny", "motivational", "scary", "bright")
+
+_TONE_INSTRUCTIONS: dict[str, str] = {
+    "funny": "Write a playful, lightly absurd mini-scene. Make the reader smile.",
+    "motivational": "Write a warm, sincere micro-pep-talk.",
+    "scary": "Write a brief, eerie moment — atmospheric dread, not gore.",
+    "bright": "Write a vivid, sensory, sunlit snapshot full of small wonders.",
+}
+
+_PUSH_SYSTEM = (
+    "You write tiny English snippets that use a given vocabulary word naturally. "
+    "Keep it to 1–2 short sentences, at most 2 short paragraphs. "
+    "The word MUST appear literally in your reply (same spelling, case-insensitive). "
+    "No headings, no quotes, no explanation — just the snippet."
+)
+
+_JUST_TALK_TAIL = "\nKeep answers short: 1–2 paragraphs at most."
+
+_JUST_TALK_VOCAB = (
+    "\nThe user is studying an English vocabulary list. "
+    "If any of these words fit naturally in your reply, use them: {words}. "
+    "Do not force words in; skip them entirely when they don't fit the answer."
+)
+
+
+def resolve_tone(tone: str, rng: random.Random | None = None) -> str:
+    """Expand "mixed" to a concrete tone; validate otherwise."""
+    if tone == "mixed":
+        return (rng or random).choice(TONES)
+    if tone not in _TONE_INSTRUCTIONS:
+        raise ValueError(f"unknown tone: {tone!r}")
+    return tone
+
+
+def push_messages(
+    word: str,
+    tone: str,
+    *,
+    rng: random.Random | None = None,
+) -> list[dict]:
+    """Build the messages payload for a scheduled push using `word`."""
+    resolved = resolve_tone(tone, rng=rng)
+    return [
+        {
+            "role": "system",
+            "content": f"{_PUSH_SYSTEM}\n{_TONE_INSTRUCTIONS[resolved]}",
+        },
+        {"role": "user", "content": f"Word to use: {word}"},
+    ]
+
+
+def just_talk_system(base: str, vocab_words: list[str]) -> str:
+    """Compose the system prompt for a plain-text chat reply.
+
+    Appends a short note reminding the model to keep replies tight and — if the
+    user has vocabulary loaded — to use those words when they fit naturally.
+    """
+    prompt = base + _JUST_TALK_TAIL
+    if vocab_words:
+        prompt += _JUST_TALK_VOCAB.format(words=", ".join(vocab_words))
+    return prompt

@@ -3,13 +3,11 @@
 
 import asyncio
 import datetime
-import json
 import logging
 import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import httpx
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.error import RetryAfter, BadRequest
@@ -22,6 +20,8 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
+import llm
+
 load_dotenv()
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -31,8 +31,6 @@ SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant running 
 ALLOWED_USER_IDS: set[int] = {
     int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace(",", " ").split() if x.strip()
 }
-LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
-MODEL = "gemma4"
 CURSOR = "▌"
 EDIT_INTERVAL = 2.0   # seconds between Telegram message edits (rate-limit safe)
 MAX_MSG_LEN = 4000    # Telegram hard limit is 4096; responses past this spill into new messages
@@ -114,36 +112,6 @@ def sys_footer() -> str:
     return f"\n\n`load {load1:.2f} {load5:.2f} {load15:.2f} | {temp_str}`"
 
 
-async def stream_llama(messages: list[dict]):
-    """Async-stream token chunks from the llama.cpp OpenAI-compatible endpoint."""
-    async with httpx.AsyncClient(timeout=180) as client:
-        async with client.stream(
-            "POST",
-            LLAMA_URL,
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "max_tokens": 1024,
-                "temperature": 0.7,
-                "stream": True,
-            },
-        ) as resp:
-            resp.raise_for_status()
-            async for raw in resp.aiter_lines():
-                if not raw.startswith("data:"):
-                    continue
-                data = raw[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                    delta = chunk["choices"][0]["delta"].get("content", "")
-                    if delta:
-                        yield delta
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
-
 async def safe_edit(message, text: str) -> None:
     """Edit a Telegram message, handling rate-limit and no-change errors."""
     try:
@@ -205,7 +173,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     last_edit = asyncio.get_event_loop().time()
 
     try:
-        async for token in stream_llama(histories[chat_id]):
+        async for token in llm.stream_chat(histories[chat_id]):
             accumulated += token
             current_page += token
 
@@ -266,16 +234,10 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get("http://127.0.0.1:8080/health")
-            status = r.json().get("status", "unknown")
-    except Exception as e:
-        status = f"unreachable ({e})"
-
+    status = await llm.health()
     await update.message.reply_text(
-        f"Model: {MODEL}\n"
-        f"Endpoint: {LLAMA_URL}\n"
+        f"Model: {llm.MODEL}\n"
+        f"Endpoint: {llm.LLAMA_URL}\n"
         f"Server status: {status}"
     )
 
