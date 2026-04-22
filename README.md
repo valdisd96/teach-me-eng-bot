@@ -68,7 +68,7 @@ Per-chat scheduling settings (timezone, pushes/day, active window, tone) are col
 | `/list [substring]` | List vocab (least-mentioned first), optionally filtered by substring. |
 | `/resetvocab` | Wipe the chat's vocabulary (with a confirm button). |
 | `/translate <text>` | Google-translate the args (or the replied message if sent as a reply) into your chat's target language. Runs outside the LLM. |
-| `/model` | Show the llama.cpp endpoint and health status. |
+| `/status` | Show host diagnostics (hardware, OS, load, temp, disk free), vocab count, llama.cpp endpoint/health, and a short model bench. |
 
 Plain-text messages go to the chat model with your vocab injected into the system prompt as soft hints. Words that appear literally in the reply bump their mention count.
 

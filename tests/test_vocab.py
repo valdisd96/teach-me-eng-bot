@@ -16,6 +16,16 @@ def _all_words(conn: sqlite3.Connection) -> list[str]:
     return [r["text"] for r in conn.execute("SELECT text FROM words").fetchall()]
 
 
+def test_count_words_is_per_chat(conn: sqlite3.Connection) -> None:
+    assert vocab.count_words(conn, CHAT) == 0
+    vocab.add_word(conn, CHAT, "alpha")
+    vocab.add_word(conn, CHAT, "beta")
+    vocab.add_word(conn, CHAT + 1, "gamma")  # different chat
+    assert vocab.count_words(conn, CHAT) == 2
+    assert vocab.count_words(conn, CHAT + 1) == 1
+    assert vocab.count_words(conn, 999) == 0
+
+
 def test_add_word_returns_true_for_new(conn: sqlite3.Connection) -> None:
     assert vocab.add_word(conn, CHAT, "ephemeral") is True
     assert _all_words(conn) == ["ephemeral"]

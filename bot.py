@@ -43,6 +43,7 @@ import db as db_module
 import llm
 import prompts
 import scheduler as sched_module
+import sysinfo
 import translator
 import vocab
 
@@ -242,7 +243,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args, or reply to a message with /translate"),
     ("clear", "Reset the chat history (LLM memory)"),
-    ("model", "Show the llama.cpp endpoint and health"),
+    ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
 
 HELP_TEXT = (
@@ -285,14 +286,36 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Conversation cleared.")
 
 
-async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
-    status = await llm.health()
+    assert conn is not None
+    chat_id = update.effective_chat.id
+
+    hardware = sysinfo.read_hardware()
+    os_name = sysinfo.read_os_release()
+    load1, load5, load15 = sysinfo.read_loadavg()
+    temp = sysinfo.read_temperature()
+    free, total = sysinfo.read_disk_free("/")
+    words = vocab.count_words(conn, chat_id)
+    server = await llm.health()
+    bench_line = await llm.bench()
+
     await update.message.reply_text(
-        f"Model: {llm.MODEL}\n"
-        f"Endpoint: {llm.LLAMA_URL}\n"
-        f"Server status: {status}"
+        "System\n"
+        f"  Hardware: {hardware}\n"
+        f"  OS: {os_name}\n"
+        f"  Load: {load1:.2f} {load5:.2f} {load15:.2f}\n"
+        f"  Temp: {temp}\n"
+        f"  Disk /: {sysinfo.format_bytes(free)} free / "
+        f"{sysinfo.format_bytes(total)}\n"
+        f"  Vocab: {words} words\n"
+        "\n"
+        "Model\n"
+        f"  Name: {llm.MODEL}\n"
+        f"  Endpoint: {llm.LLAMA_URL}\n"
+        f"  Server: {server}\n"
+        f"  Bench: {bench_line}"
     )
 
 
@@ -632,7 +655,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("clear", cmd_clear))
-    app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("list", cmd_list))

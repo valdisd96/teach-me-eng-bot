@@ -123,6 +123,15 @@ def list_words(
     ).fetchall()
 
 
+def count_words(conn: sqlite3.Connection, chat_id: int) -> int:
+    """Return how many vocab rows exist for `chat_id`."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM words WHERE chat_id = ?",
+        (chat_id,),
+    ).fetchone()
+    return row[0] if row else 0
+
+
 def scan_mentions(text: str, words: list[tuple[int, str]]) -> list[int]:
     """Return ids of vocab words that appear as literal substrings in `text`.
 
