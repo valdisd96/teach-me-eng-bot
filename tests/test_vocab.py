@@ -158,6 +158,28 @@ def test_bold_matches_ignores_empty_word_entries() -> None:
     assert vocab.bold_matches("hello world", ["", "world"]) == "hello <b>world</b>"
 
 
+def test_bold_matches_strips_markdown_bold_around_vocab_word() -> None:
+    out = vocab.bold_matches(
+        "It's a testament to **strength** today.", ["strength"]
+    )
+    assert out == "It&#x27;s a testament to <b>strength</b> today."
+
+
+def test_bold_matches_strips_markdown_bold_when_word_not_in_vocab() -> None:
+    out = vocab.bold_matches("truly **remarkable** indeed", [])
+    assert out == "truly remarkable indeed"
+
+
+def test_bold_matches_strips_underscore_markdown_bold() -> None:
+    out = vocab.bold_matches("__placid__ waters", ["placid"])
+    assert out == "<b>placid</b> waters"
+
+
+def test_bold_matches_handles_multiple_markdown_chunks() -> None:
+    out = vocab.bold_matches("**alpha** then **beta** end", ["beta"])
+    assert out == "alpha then <b>beta</b> end"
+
+
 def test_bump_mentions_increments_and_timestamps(conn: sqlite3.Connection) -> None:
     vocab.add_word(conn, CHAT, "placid")
     wid = conn.execute("SELECT id FROM words").fetchone()["id"]
