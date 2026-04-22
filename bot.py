@@ -49,7 +49,10 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 SYSTEM_PROMPT = os.getenv(
-    "SYSTEM_PROMPT", "You are a helpful assistant running on a Raspberry Pi."
+    "SYSTEM_PROMPT",
+    "You are a friendly English tutor chatting casually with a learner. "
+    "Use natural, everyday English. If they ask about grammar, vocabulary, "
+    "or usage, explain briefly with a small example.",
 )
 # Comma- or whitespace-separated Telegram user IDs allowed to talk to the bot.
 # Empty/unset means no restriction (all users allowed).

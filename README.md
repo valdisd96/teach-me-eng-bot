@@ -52,7 +52,7 @@ systemctl restart gemma-rpi-agent
 | Variable | Required | Default |
 |---|---|---|
 | `TELEGRAM_TOKEN` | Yes | — |
-| `SYSTEM_PROMPT` | No | `"You are a helpful assistant running on a Raspberry Pi."` |
+| `SYSTEM_PROMPT` | No | `"You are a friendly English tutor chatting casually with a learner. Use natural, everyday English. If they ask about grammar, vocabulary, or usage, explain briefly with a small example."` |
 | `ALLOWED_USER_IDS` | No | empty (allow all) |
 
 Per-chat scheduling settings (timezone, pushes/day, active window, tone) are collected via the `/start` flow and stored in SQLite at `data/vocab.db` — not via env vars.
