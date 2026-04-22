@@ -380,7 +380,8 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings = config_flow.load_settings(conn, chat_id)
     if settings is None:
         await update.message.reply_text(
-            "Run /start first so I know which language to translate into."
+            "Run /start first so I know which language to translate into.",
+            do_quote=True,
         )
         return
 
@@ -396,7 +397,8 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not source_text:
         await update.message.reply_text(
-            "Usage: /translate <text>, or reply to a message with /translate."
+            "Usage: /translate <text>, or reply to a message with /translate.",
+            do_quote=True,
         )
         return
 
@@ -406,9 +408,13 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
     except Exception as e:  # noqa: BLE001 — surface the reason to the user
         log.error("translate failed for chat %s: %s", chat_id, e)
-        await update.message.reply_text(f"⚠️ Translation failed: {e}")
+        await update.message.reply_text(
+            f"⚠️ Translation failed: {e}", do_quote=True
+        )
         return
-    await update.message.reply_text(translated or "⚠️ Empty translation.")
+    await update.message.reply_text(
+        translated or "⚠️ Empty translation.", do_quote=True
+    )
 
 
 async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
