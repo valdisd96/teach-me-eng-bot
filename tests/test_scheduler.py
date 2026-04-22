@@ -35,6 +35,24 @@ def test_plan_returns_empty_if_window_non_positive() -> None:
     ) == []
 
 
+def test_plan_treats_midnight_end_as_end_of_day() -> None:
+    # active_end="00:00" should mean the 24:00 boundary, not the same day's
+    # midnight (which would make the window negative and return []).
+    times = scheduler.plan_push_times(
+        datetime.date(2026, 4, 22),
+        "UTC",
+        8,
+        "13:00",
+        "00:00",
+        rng=random.Random(0),
+    )
+    assert len(times) == 8
+    start = datetime.datetime(2026, 4, 22, 13, 0, tzinfo=UTC)
+    end = datetime.datetime(2026, 4, 23, 0, 0, tzinfo=UTC)
+    for t in times:
+        assert start <= t <= end
+
+
 def test_plan_returns_empty_for_zero_pushes() -> None:
     assert scheduler.plan_push_times(
         datetime.date(2026, 4, 22),
