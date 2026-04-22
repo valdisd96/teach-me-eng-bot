@@ -26,7 +26,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fsrs import Rating
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
@@ -238,6 +238,34 @@ async def dispatch_push(chat_id: int) -> None:
 # --- command handlers -------------------------------------------------------
 
 
+# Single source of truth for commands — used by /help and set_my_commands.
+COMMANDS: list[tuple[str, str]] = [
+    ("start", "Configure schedule: timezone, pushes/day, active window, tone"),
+    ("help", "Show this help message"),
+    ("add", "Add a word or phrase to this chat's vocab"),
+    ("remove", "Remove a word or phrase from vocab"),
+    ("list", "List vocab words (optionally filter by substring)"),
+    ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
+    ("clear", "Reset the chat history (LLM memory)"),
+    ("model", "Show the llama.cpp endpoint and health"),
+]
+
+HELP_TEXT = (
+    "🤖 *Gemma vocab agent*\n\n"
+    "*Getting started*\n"
+    "1. Run /start and answer four questions: timezone, pushes per day (1–8), "
+    "active window (HH:MM–HH:MM), tone.\n"
+    "2. Add words with /add <word or phrase>. The bot sends short snippets "
+    "using those words at random times inside your window.\n"
+    "3. Tap ✅ knew / ❌ forgot on each push — ratings drive FSRS spaced "
+    "repetition so tougher words come back more often.\n\n"
+    "Plain (non-slash) messages chat with the model and will naturally reuse "
+    "your vocab when it fits.\n\n"
+    "*Commands*\n"
+    + "\n".join(f"/{name} — {desc}" for name, desc in COMMANDS)
+)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
@@ -245,6 +273,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = config_flow.ConfigSession()
     sessions[chat_id] = session
     await update.message.reply_text(session.first_prompt())
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -508,6 +542,10 @@ async def _post_init(application: Application) -> None:
     runner.start()
     runner.refresh_all()
     log.info("Scheduler started; refreshed jobs for all known chats.")
+    # Populate Telegram's native command menu so clients show autocomplete.
+    await application.bot.set_my_commands(
+        [BotCommand(name, desc) for name, desc in COMMANDS]
+    )
 
 
 async def _post_shutdown(application: Application) -> None:
@@ -532,6 +570,7 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("add", cmd_add))
