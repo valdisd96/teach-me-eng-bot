@@ -48,6 +48,16 @@ def test_push_messages_mixed_tone_uses_rng() -> None:
     )
 
 
+def test_explain_messages_has_system_and_user_with_word() -> None:
+    msgs = prompts.explain_messages("ephemeral")
+    assert [m["role"] for m in msgs] == ["system", "user"]
+    assert "ephemeral" in msgs[1]["content"]
+    # System prompt should steer toward a compact meaning + example.
+    sys = msgs[0]["content"].lower()
+    assert "example" in sys
+    assert "two sentences" in sys
+
+
 def test_just_talk_system_without_vocab_just_appends_length_rule() -> None:
     out = prompts.just_talk_system("You are helpful.", [])
     assert out.startswith("You are helpful.")

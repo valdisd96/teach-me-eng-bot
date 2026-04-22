@@ -400,6 +400,9 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("Malformed rate callback: %r", query.data)
         return
     rating = Rating.Good if verdict == "good" else Rating.Again
+    word_row = conn.execute(
+        "SELECT text FROM words WHERE id = ?", (word_id,)
+    ).fetchone()
     try:
         vocab.rate_word(conn, word_id, rating)
     except KeyError:
@@ -414,6 +417,24 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except BadRequest:
         pass  # message too old or already replaced
+
+    # On ❌ forgot, follow up with a tiny definition + example so the user can
+    # learn the word on the spot.
+    if rating == Rating.Again and word_row is not None:
+        word_text = word_row["text"]
+        try:
+            explanation = (await llm.chat(prompts.explain_messages(word_text))).strip()
+        except Exception as e:  # noqa: BLE001 — a failed explain shouldn't break rating
+            log.error("explain failed for word %s: %s", word_id, e)
+            return
+        if not explanation:
+            return
+        chat_id = update.effective_chat.id
+        try:
+            await query.message.reply_text(explanation)
+            append_turn(chat_id, "explain", f"[{word_text}] {explanation}")
+        except Exception as e:  # noqa: BLE001
+            log.error("failed to send explanation for chat %s: %s", chat_id, e)
 
 
 async def on_resetvocab_confirm(
