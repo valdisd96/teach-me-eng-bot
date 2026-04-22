@@ -107,3 +107,46 @@ def test_vocab_target_forward_picks_source() -> None:
 def test_vocab_target_reverse_picks_translation() -> None:
     # target→English: the English translation is what we want in vocab.
     assert translator.vocab_target("привет", "hello", reverse=True) == "hello"
+
+
+def test_pending_vocab_register_returns_unique_monotonic_tokens() -> None:
+    pv = translator.PendingVocab()
+    t1 = pv.register(111, "hello")
+    t2 = pv.register(111, "world")
+    t3 = pv.register(222, "hello")
+    assert t1 != t2 != t3
+    assert t2 > t1 and t3 > t2
+
+
+def test_pending_vocab_pop_returns_entry_and_removes_it() -> None:
+    pv = translator.PendingVocab()
+    token = pv.register(42, "goodbye")
+    assert pv.pop(token) == (42, "goodbye")
+    # Second pop of the same token is a miss.
+    assert pv.pop(token) is None
+
+
+def test_pending_vocab_pop_unknown_returns_none() -> None:
+    pv = translator.PendingVocab()
+    assert pv.pop(999) is None
+
+
+def test_pending_vocab_evicts_oldest_past_cap() -> None:
+    pv = translator.PendingVocab(max_size=3)
+    t1 = pv.register(1, "a")
+    t2 = pv.register(1, "b")
+    t3 = pv.register(1, "c")
+    t4 = pv.register(1, "d")  # should evict t1
+    assert pv.pop(t1) is None
+    assert pv.pop(t2) == (1, "b")
+    assert pv.pop(t3) == (1, "c")
+    assert pv.pop(t4) == (1, "d")
+
+
+def test_pending_vocab_len_tracks_live_entries() -> None:
+    pv = translator.PendingVocab()
+    assert len(pv) == 0
+    t = pv.register(1, "a")
+    assert len(pv) == 1
+    pv.pop(t)
+    assert len(pv) == 0
