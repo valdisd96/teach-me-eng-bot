@@ -19,6 +19,7 @@ import datetime
 import html
 import math
 import random
+import re
 import sqlite3
 
 from fsrs import Card, Rating, Scheduler, State
@@ -143,16 +144,22 @@ def scan_mentions(text: str, words: list[tuple[int, str]]) -> list[int]:
     return [wid for wid, w in words if w and w in haystack]
 
 
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
+
+
 def bold_matches(text: str, words: list[str]) -> str:
     """HTML-escape `text` and wrap any vocab-word substrings in <b>…</b>.
 
     Mirrors `scan_mentions`'s case-insensitive substring match. When two
     candidate words would overlap (e.g. "cat" inside "concatenate") the
-    longer one wins, so we never bold a fragment of a longer match. Returns
-    a string safe to send with Telegram's HTML parse mode.
+    longer one wins, so we never bold a fragment of a longer match. Markdown
+    bold markers (`**x**` / `__x__`) the model sometimes emits are stripped
+    first — Telegram's HTML mode would otherwise render them literally.
+    Returns a string safe to send with Telegram's HTML parse mode.
     """
     if not text:
         return ""
+    text = _MD_BOLD_RE.sub(lambda m: m.group(1) or m.group(2), text)
     haystack = text.lower()
     spans: list[tuple[int, int]] = []
     for w in sorted({w for w in words if w}, key=len, reverse=True):
