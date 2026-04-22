@@ -245,7 +245,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("remove", "Remove a word or phrase from vocab"),
     ("list", "List vocab words (optionally filter by substring)"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
-    ("translate", "Translate args; input in your target language is reverse-translated to English and added to vocab"),
+    ("translate", "Translate args; the English side of the pair (source or reverse-translated) is added to vocab"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -442,20 +442,18 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("⚠️ Empty translation.", do_quote=True)
         return
 
-    if not reverse:
-        await update.message.reply_text(translated, do_quote=True)
-        return
-
-    # Reverse flow: add the English translation to this chat's vocab if the
-    # original phrase is short enough. Count words on the *original* input.
+    # Both directions feed English into vocab: reverse adds the translation,
+    # forward adds the source. Word-count cap is applied to the user's input
+    # in both cases.
+    to_add = translator.vocab_target(source_text, translated, reverse)
     word_count = len(source_text.split())
     added = False
     if word_count <= 5:
         try:
-            added = vocab.add_word(conn, chat_id, translated)
+            added = vocab.add_word(conn, chat_id, to_add)
         except ValueError:
             added = False
-    note = translator.format_reverse_note(word_count, added)
+    note = translator.format_vocab_note(word_count, added)
     await update.message.reply_text(f"{translated}\n{note}", do_quote=True)
 
 
