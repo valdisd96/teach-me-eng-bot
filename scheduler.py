@@ -67,6 +67,10 @@ def plan_push_times(
     eh, em = _parse_hm(active_end)
     start = datetime.datetime.combine(date, datetime.time(sh, sm), tzinfo=zone)
     end = datetime.datetime.combine(date, datetime.time(eh, em), tzinfo=zone)
+    # "00:00" as active_end means end-of-day (the 24:00 boundary), not the
+    # same day's midnight — roll it forward one day so the window is positive.
+    if (eh, em) == (0, 0):
+        end += datetime.timedelta(days=1)
     window_min = int((end - start).total_seconds() // 60)
     if window_min <= 0 or pushes_per_day <= 0:
         return []
