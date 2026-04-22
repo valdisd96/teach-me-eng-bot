@@ -25,6 +25,12 @@ _PUSH_SYSTEM = (
     "No headings, no quotes, no explanation — just the snippet."
 )
 
+_EXPLAIN_SYSTEM = (
+    "You are a concise English tutor. In ONE short sentence, explain in plain "
+    "English what the given word or phrase means. Then give ONE short example "
+    "sentence that uses it. Two sentences total. No headings, no quotes, no lists."
+)
+
 _JUST_TALK_TAIL = "\nKeep answers short: 1–2 paragraphs at most."
 
 _JUST_TALK_VOCAB = (
@@ -57,6 +63,18 @@ def push_messages(
             "content": f"{_PUSH_SYSTEM}\n{_TONE_INSTRUCTIONS[resolved]}",
         },
         {"role": "user", "content": f"Word to use: {word}"},
+    ]
+
+
+def explain_messages(word: str) -> list[dict]:
+    """Build messages asking for a brief meaning + one example for `word`.
+
+    Used when the user taps ❌ forgot on a push — we follow up with a tiny
+    definition so they can learn it on the spot.
+    """
+    return [
+        {"role": "system", "content": _EXPLAIN_SYSTEM},
+        {"role": "user", "content": f"Word or phrase: {word}"},
     ]
 
 

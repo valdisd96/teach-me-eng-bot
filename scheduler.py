@@ -129,6 +129,28 @@ async def compose_push(
     return picked["id"], word, text
 
 
+async def compose_explanation(
+    conn: sqlite3.Connection,
+    word_id: int,
+    *,
+    llm_chat: LlmChat,
+) -> str | None:
+    """Fetch the word text and ask the LLM for a short meaning + example.
+
+    Returns the stripped explanation, or None if the word no longer exists or
+    the LLM returned nothing usable. The caller is responsible for actually
+    delivering the text (e.g. via Telegram) — keeping the HTTP side out of
+    this module makes it testable without mocks.
+    """
+    row = conn.execute(
+        "SELECT text FROM words WHERE id = ?", (word_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    text = (await llm_chat(prompts.explain_messages(row["text"]))).strip()
+    return text or None
+
+
 def log_push(
     conn: sqlite3.Connection,
     chat_id: int,

@@ -415,6 +415,31 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except BadRequest:
         pass  # message too old or already replaced
 
+    # On ❌ forgot, follow up with a tiny definition + example so the user can
+    # learn the word on the spot.
+    if rating != Rating.Again:
+        return
+    try:
+        explanation = await sched_module.compose_explanation(
+            conn, word_id, llm_chat=llm.chat
+        )
+    except Exception as e:  # noqa: BLE001 — a failed explain shouldn't break rating
+        log.error("explain failed for word %s: %s", word_id, e)
+        return
+    if not explanation:
+        return
+    chat_id = update.effective_chat.id
+    try:
+        await query.message.reply_text(explanation)
+        # Best-effort: reuse the rated word's text for the transcript tag.
+        row = conn.execute(
+            "SELECT text FROM words WHERE id = ?", (word_id,)
+        ).fetchone()
+        tag_word = row["text"] if row is not None else "?"
+        append_turn(chat_id, "explain", f"[{tag_word}] {explanation}")
+    except Exception as e:  # noqa: BLE001
+        log.error("failed to send explanation for chat %s: %s", chat_id, e)
+
 
 async def on_resetvocab_confirm(
     update: Update, context: ContextTypes.DEFAULT_TYPE
