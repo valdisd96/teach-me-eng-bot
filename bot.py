@@ -151,16 +151,6 @@ def is_allowed(update: Update) -> bool:
     return True
 
 
-def sys_footer() -> str:
-    load1, load5, load15 = os.getloadavg()
-    try:
-        temp_mc = int(open("/sys/class/thermal/thermal_zone0/temp").read())
-        temp_str = f"{temp_mc / 1000:.1f}°C"
-    except OSError:
-        temp_str = "n/a"
-    return f"\n\n`load {load1:.2f} {load5:.2f} {load15:.2f} | {temp_str}`"
-
-
 # --- telegram send helpers --------------------------------------------------
 
 
@@ -584,13 +574,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await safe_edit(current_msg, current_page or f"⚠️ Error: {e}")
         return
 
-    footer = sys_footer()
     final_text = current_page or "⚠️ No response from model."
-    if len(final_text) + len(footer) > MAX_MSG_LEN:
-        await safe_edit(current_msg, final_text)
-        await safe_send(context.bot, chat_id, footer.lstrip())
-    else:
-        await safe_edit(current_msg, final_text + footer)
+    await safe_edit(current_msg, final_text)
 
     histories[chat_id].append({"role": "assistant", "content": accumulated})
     append_turn(chat_id, "assistant", accumulated)
