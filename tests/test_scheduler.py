@@ -243,6 +243,60 @@ def test_compose_push_returns_anyway_after_retries(conn: sqlite3.Connection) -> 
     assert "ephemeral" not in text.lower()
 
 
+# --- compose_explanation -----------------------------------------------------
+
+
+def test_compose_explanation_returns_stripped_text(conn: sqlite3.Connection) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "ephemeral")
+    row = conn.execute(
+        "SELECT id FROM words WHERE chat_id = ?", (CHAT,)
+    ).fetchone()
+
+    seen: list[list[dict]] = []
+
+    async def llm_ok(msgs):
+        seen.append(msgs)
+        return "  Lasting a very short time.\nExample: The joy was ephemeral.  \n"
+
+    out = asyncio.run(
+        scheduler.compose_explanation(conn, row["id"], llm_chat=llm_ok)
+    )
+    assert out == "Lasting a very short time.\nExample: The joy was ephemeral."
+    # The prompt must be built from prompts.explain_messages (system + user
+    # with the word in the user message).
+    assert len(seen) == 1
+    msgs = seen[0]
+    assert [m["role"] for m in msgs] == ["system", "user"]
+    assert "ephemeral" in msgs[1]["content"]
+
+
+def test_compose_explanation_returns_none_for_unknown_word(conn: sqlite3.Connection) -> None:
+    async def llm_fail(msgs):
+        raise AssertionError("llm should not be called when the word is gone")
+
+    out = asyncio.run(
+        scheduler.compose_explanation(conn, 99999, llm_chat=llm_fail)
+    )
+    assert out is None
+
+
+def test_compose_explanation_returns_none_on_empty_llm_reply(conn: sqlite3.Connection) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "placid")
+    row = conn.execute(
+        "SELECT id FROM words WHERE chat_id = ?", (CHAT,)
+    ).fetchone()
+
+    async def llm_blank(msgs):
+        return "   \n  "
+
+    out = asyncio.run(
+        scheduler.compose_explanation(conn, row["id"], llm_chat=llm_blank)
+    )
+    assert out is None
+
+
 # --- log_push / mark_rated ---------------------------------------------------
 
 
