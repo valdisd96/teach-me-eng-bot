@@ -16,6 +16,7 @@ so no single signal dominates and randomness is baked into `random.choices`.
 from __future__ import annotations
 
 import datetime
+import html
 import math
 import random
 import sqlite3
@@ -140,6 +141,42 @@ def scan_mentions(text: str, words: list[tuple[int, str]]) -> list[int]:
     """
     haystack = text.lower()
     return [wid for wid, w in words if w and w in haystack]
+
+
+def bold_matches(text: str, words: list[str]) -> str:
+    """HTML-escape `text` and wrap any vocab-word substrings in <b>…</b>.
+
+    Mirrors `scan_mentions`'s case-insensitive substring match. When two
+    candidate words would overlap (e.g. "cat" inside "concatenate") the
+    longer one wins, so we never bold a fragment of a longer match. Returns
+    a string safe to send with Telegram's HTML parse mode.
+    """
+    if not text:
+        return ""
+    haystack = text.lower()
+    spans: list[tuple[int, int]] = []
+    for w in sorted({w for w in words if w}, key=len, reverse=True):
+        i = 0
+        while True:
+            idx = haystack.find(w, i)
+            if idx == -1:
+                break
+            end = idx + len(w)
+            i = end
+            if any(s < end and idx < e for s, e in spans):
+                continue
+            spans.append((idx, end))
+    spans.sort()
+    out: list[str] = []
+    cursor = 0
+    for s, e in spans:
+        out.append(html.escape(text[cursor:s]))
+        out.append("<b>")
+        out.append(html.escape(text[s:e]))
+        out.append("</b>")
+        cursor = e
+    out.append(html.escape(text[cursor:]))
+    return "".join(out)
 
 
 def bump_mentions(conn: sqlite3.Connection, word_ids: list[int]) -> None:

@@ -155,25 +155,25 @@ def is_allowed(update: Update) -> bool:
 # --- telegram send helpers --------------------------------------------------
 
 
-async def safe_edit(message, text: str) -> None:
+async def safe_edit(message, text: str, *, parse_mode: str | None = None) -> None:
     """Edit a Telegram message, handling rate-limit and no-change errors."""
     try:
-        await message.edit_text(text)
+        await message.edit_text(text, parse_mode=parse_mode)
     except RetryAfter as e:
         await asyncio.sleep(e.retry_after + 0.5)
-        await message.edit_text(text)
+        await message.edit_text(text, parse_mode=parse_mode)
     except BadRequest as e:
         if "message is not modified" not in str(e).lower():
             raise
 
 
-async def safe_send(bot, chat_id: int, text: str):
+async def safe_send(bot, chat_id: int, text: str, *, parse_mode: str | None = None):
     """Send a new Telegram message, retrying once on RetryAfter."""
     try:
-        return await bot.send_message(chat_id=chat_id, text=text)
+        return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
     except RetryAfter as e:
         await asyncio.sleep(e.retry_after + 0.5)
-        return await bot.send_message(chat_id=chat_id, text=text)
+        return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
 
 
 def split_point(text: str, max_len: int) -> int:
@@ -219,8 +219,12 @@ async def dispatch_push(chat_id: int) -> None:
             ),
         ]]
     )
+    chat_words = [r["text"] for r in vocab.list_words(conn, chat_id)]
+    formatted = vocab.bold_matches(text, chat_words)
     try:
-        msg = await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+        msg = await app.bot.send_message(
+            chat_id=chat_id, text=formatted, reply_markup=kb, parse_mode="HTML"
+        )
         conn.execute(
             "UPDATE push_log SET tg_message_id = ? WHERE id = ?",
             (msg.message_id, push_id),
@@ -514,13 +518,16 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not explanation:
         return
     chat_id = update.effective_chat.id
+    # Reuse the rated word's text for the transcript tag and to bold it inline.
+    row = conn.execute(
+        "SELECT text FROM words WHERE id = ?", (word_id,)
+    ).fetchone()
+    tag_word = row["text"] if row is not None else "?"
+    formatted = vocab.bold_matches(
+        explanation, [tag_word] if row is not None else []
+    )
     try:
-        await query.message.reply_text(explanation)
-        # Best-effort: reuse the rated word's text for the transcript tag.
-        row = conn.execute(
-            "SELECT text FROM words WHERE id = ?", (word_id,)
-        ).fetchone()
-        tag_word = row["text"] if row is not None else "?"
+        await query.message.reply_text(formatted, parse_mode="HTML")
         append_turn(chat_id, "explain", f"[{tag_word}] {explanation}")
     except Exception as e:  # noqa: BLE001
         log.error("failed to send explanation for chat %s: %s", chat_id, e)
@@ -597,6 +604,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     accumulated = ""
     last_edit = asyncio.get_event_loop().time()
 
+    def fmt(s: str) -> str:
+        return vocab.bold_matches(s, word_texts)
+
     try:
         async for token in llm.stream_chat(histories[chat_id]):
             accumulated += token
@@ -605,25 +615,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             while len(current_page) > MAX_MSG_LEN:
                 idx = split_point(current_page, MAX_MSG_LEN)
                 head, current_page = current_page[:idx], current_page[idx:]
-                await safe_edit(current_msg, head)
+                await safe_edit(current_msg, fmt(head), parse_mode="HTML")
                 current_msg = await safe_send(
-                    context.bot, chat_id, current_page + CURSOR
+                    context.bot, chat_id, fmt(current_page + CURSOR), parse_mode="HTML"
                 )
                 last_edit = asyncio.get_event_loop().time()
 
             now = asyncio.get_event_loop().time()
             if now - last_edit >= EDIT_INTERVAL:
-                await safe_edit(current_msg, current_page + CURSOR)
+                await safe_edit(current_msg, fmt(current_page + CURSOR), parse_mode="HTML")
                 last_edit = now
 
     except Exception as e:
         log.error("Streaming error: %s", e)
         append_turn(chat_id, "error", f"{type(e).__name__}: {e}")
-        await safe_edit(current_msg, current_page or f"⚠️ Error: {e}")
+        await safe_edit(current_msg, fmt(current_page or f"⚠️ Error: {e}"), parse_mode="HTML")
         return
 
     final_text = current_page or "⚠️ No response from model."
-    await safe_edit(current_msg, final_text)
+    await safe_edit(current_msg, fmt(final_text), parse_mode="HTML")
 
     histories[chat_id].append({"role": "assistant", "content": accumulated})
     append_turn(chat_id, "assistant", accumulated)
