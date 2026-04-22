@@ -19,6 +19,12 @@ Exposed primitives:
     Only non-Latin targets can ever return True; Latin-script targets
     (de/fr/es/…) always return False because script alone can't distinguish
     them from English.
+  * `vocab_target(source, translated, reverse)` — which half of the pair is
+    the English one, and therefore the one that belongs in the learner's
+    vocab list.
+  * `format_vocab_note(word_count, added, max_words=5)` — the 1-line status
+    (`added to vocab ✅` / `already in vocab` / `not added (N words)`) shown
+    beneath a /translate reply.
 
 `_name_to_code()` is cached because `deep_translator`'s language list is a
 static dict (no network), so we only build it once per process.
@@ -162,8 +168,11 @@ def is_target_script(text: str, target: str) -> bool:
     return in_target > 0 and in_target > in_other
 
 
-def format_reverse_note(word_count: int, added: bool, max_words: int = 5) -> str:
-    """One-line status shown under the English reply of a reverse-translate.
+def format_vocab_note(word_count: int, added: bool, max_words: int = 5) -> str:
+    """One-line status shown under the reply of a /translate vocab add.
+
+    Used for both directions: reverse (target→English, adds the translation)
+    and forward (English→target, adds the source). The rules are identical:
 
     * word_count > max_words → 'not added (N words)'
     * within limit + newly added → 'added to vocab ✅'
@@ -172,3 +181,12 @@ def format_reverse_note(word_count: int, added: bool, max_words: int = 5) -> str
     if word_count > max_words:
         return f"not added ({word_count} words)"
     return "added to vocab ✅" if added else "already in vocab"
+
+
+def vocab_target(source_text: str, translated: str, reverse: bool) -> str:
+    """Return the English side of a /translate pair — the one that lands in vocab.
+
+    Forward flow (English→target) adds the source. Reverse flow (target→English)
+    adds the translation. Either way, the learner's English vocab is what grows.
+    """
+    return translated if reverse else source_text

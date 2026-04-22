@@ -80,20 +80,30 @@ def test_is_target_script_unknown_target_returns_false() -> None:
     assert translator.is_target_script("привет", "xx") is False
 
 
-def test_format_reverse_note_added() -> None:
-    assert translator.format_reverse_note(1, added=True) == "added to vocab ✅"
-    assert translator.format_reverse_note(5, added=True) == "added to vocab ✅"
+def test_format_vocab_note_added() -> None:
+    assert translator.format_vocab_note(1, added=True) == "added to vocab ✅"
+    assert translator.format_vocab_note(5, added=True) == "added to vocab ✅"
 
 
-def test_format_reverse_note_duplicate() -> None:
-    assert translator.format_reverse_note(2, added=False) == "already in vocab"
+def test_format_vocab_note_duplicate() -> None:
+    assert translator.format_vocab_note(2, added=False) == "already in vocab"
 
 
-def test_format_reverse_note_too_long() -> None:
-    assert translator.format_reverse_note(6, added=False) == "not added (6 words)"
+def test_format_vocab_note_too_long() -> None:
+    assert translator.format_vocab_note(6, added=False) == "not added (6 words)"
     # `added` is ignored once over the limit.
-    assert translator.format_reverse_note(9, added=True) == "not added (9 words)"
+    assert translator.format_vocab_note(9, added=True) == "not added (9 words)"
 
 
-def test_format_reverse_note_custom_max() -> None:
-    assert translator.format_reverse_note(3, added=True, max_words=2) == "not added (3 words)"
+def test_format_vocab_note_custom_max() -> None:
+    assert translator.format_vocab_note(3, added=True, max_words=2) == "not added (3 words)"
+
+
+def test_vocab_target_forward_picks_source() -> None:
+    # English→target: the English source is what we want in vocab.
+    assert translator.vocab_target("hello", "привет", reverse=False) == "hello"
+
+
+def test_vocab_target_reverse_picks_translation() -> None:
+    # target→English: the English translation is what we want in vocab.
+    assert translator.vocab_target("привет", "hello", reverse=True) == "hello"
