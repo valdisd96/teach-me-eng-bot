@@ -13,6 +13,8 @@ import sqlite3
 from dataclasses import dataclass, asdict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import translator
+
 TONES = ("funny", "motivational", "scary", "bright", "mixed")
 MIN_PUSHES = 6
 MAX_PUSHES = 12
@@ -25,6 +27,7 @@ class Settings:
     active_start: str  # "HH:MM"
     active_end: str
     tone: str
+    target_lang: str  # ISO 639-1 code used by /translate
 
 
 def validate_tz(s: str) -> str:
@@ -68,6 +71,10 @@ def validate_tone(s: str) -> str:
     return v
 
 
+def validate_target_lang(s: str) -> str:
+    return translator.normalize_target(s)
+
+
 # Step definitions: (field, prompt, validator).
 _STEPS = [
     ("tz", "What timezone? (e.g. Europe/Warsaw, UTC)", validate_tz),
@@ -90,6 +97,11 @@ _STEPS = [
         "tone",
         "Tone preference? (funny / motivational / scary / bright / mixed)",
         validate_tone,
+    ),
+    (
+        "target_lang",
+        "Translation target language? (e.g. 'russian' or 'ru' — used by /translate)",
+        validate_target_lang,
     ),
 ]
 
@@ -150,12 +162,14 @@ def save_settings(
     """Upsert the chat's configuration row."""
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
-        "INSERT INTO chats(chat_id, tz, pushes_per_day, active_start, active_end, tone, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "INSERT INTO chats("
+        "chat_id, tz, pushes_per_day, active_start, active_end, tone, "
+        "translate_target, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(chat_id) DO UPDATE SET "
         "tz=excluded.tz, pushes_per_day=excluded.pushes_per_day, "
         "active_start=excluded.active_start, active_end=excluded.active_end, "
-        "tone=excluded.tone",
+        "tone=excluded.tone, translate_target=excluded.translate_target",
         (
             chat_id,
             settings.tz,
@@ -163,6 +177,7 @@ def save_settings(
             settings.active_start,
             settings.active_end,
             settings.tone,
+            settings.target_lang,
             now,
         ),
     )
@@ -172,7 +187,7 @@ def load_settings(
     conn: sqlite3.Connection, chat_id: int
 ) -> Settings | None:
     row = conn.execute(
-        "SELECT tz, pushes_per_day, active_start, active_end, tone "
+        "SELECT tz, pushes_per_day, active_start, active_end, tone, translate_target "
         "FROM chats WHERE chat_id = ?",
         (chat_id,),
     ).fetchone()
@@ -184,6 +199,7 @@ def load_settings(
         active_start=row["active_start"],
         active_end=row["active_end"],
         tone=row["tone"],
+        target_lang=row["translate_target"],
     )
 
 

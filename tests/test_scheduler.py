@@ -152,7 +152,7 @@ def _seed_chat(conn: sqlite3.Connection, tone: str = "funny") -> None:
     config_flow.save_settings(
         conn,
         CHAT,
-        config_flow.Settings("UTC", 2, "09:00", "21:00", tone),
+        config_flow.Settings("UTC", 2, "09:00", "21:00", tone, "ru"),
     )
 
 
@@ -336,7 +336,7 @@ def runner(conn: sqlite3.Connection):
 def test_schedule_chat_adds_plan_and_push_jobs(
     runner: scheduler.PushRunner, conn: sqlite3.Connection
 ) -> None:
-    settings = config_flow.Settings("UTC", 3, "09:00", "21:00", "mixed")
+    settings = config_flow.Settings("UTC", 3, "09:00", "21:00", "mixed", "ru")
     config_flow.save_settings(conn, CHAT, settings)
     runner.schedule_chat(CHAT, settings)
     ids = {j.id for j in runner.scheduler.get_jobs()}
@@ -351,7 +351,7 @@ def test_schedule_chat_adds_plan_and_push_jobs(
 def test_schedule_chat_is_idempotent(
     runner: scheduler.PushRunner, conn: sqlite3.Connection
 ) -> None:
-    settings = config_flow.Settings("UTC", 2, "00:00", "23:59", "mixed")
+    settings = config_flow.Settings("UTC", 2, "00:00", "23:59", "mixed", "ru")
     config_flow.save_settings(conn, CHAT, settings)
     runner.schedule_chat(CHAT, settings)
     first = {j.id for j in runner.scheduler.get_jobs()}

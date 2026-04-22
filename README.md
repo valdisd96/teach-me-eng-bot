@@ -61,12 +61,13 @@ Per-chat scheduling settings (timezone, pushes/day, active window, tone) are col
 
 | Command | Description |
 |---|---|
-| `/start` | Walks a guided config: timezone → pushes/day (6–12) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed). Re-running overwrites settings; vocab is preserved. |
+| `/start` | Walks a guided config: timezone → pushes/day (6–12) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed) → target language for `/translate`. Re-running overwrites settings; vocab is preserved. |
 | `/clear` | Resets the chat's LLM history. Vocab and settings untouched. |
 | `/add <word or phrase>` | Add a word to this chat's vocab. |
 | `/remove <word or phrase>` | Remove a word. |
 | `/list [substring]` | List vocab (least-mentioned first), optionally filtered by substring. |
 | `/resetvocab` | Wipe the chat's vocabulary (with a confirm button). |
+| `/translate <text>` | Google-translate the args (or the replied message if sent as a reply) into your chat's target language. Runs outside the LLM. |
 | `/model` | Show the llama.cpp endpoint and health status. |
 
 Plain-text messages go to the chat model with your vocab injected into the system prompt as soft hints. Words that appear literally in the reply bump their mention count.

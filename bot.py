@@ -43,6 +43,7 @@ import db as db_module
 import llm
 import prompts
 import scheduler as sched_module
+import translator
 import vocab
 
 load_dotenv()
@@ -243,12 +244,13 @@ async def dispatch_push(chat_id: int) -> None:
 
 # Single source of truth for commands — used by /help and set_my_commands.
 COMMANDS: list[tuple[str, str]] = [
-    ("start", "Configure schedule: timezone, pushes/day, active window, tone"),
+    ("start", "Configure schedule: timezone, pushes/day, active window, tone, target language"),
     ("help", "Show this help message"),
     ("add", "Add a word or phrase to this chat's vocab"),
     ("remove", "Remove a word or phrase from vocab"),
     ("list", "List vocab words (optionally filter by substring)"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
+    ("translate", "Translate args, or reply to a message with /translate"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("model", "Show the llama.cpp endpoint and health"),
 ]
@@ -256,8 +258,8 @@ COMMANDS: list[tuple[str, str]] = [
 HELP_TEXT = (
     "🤖 *Gemma vocab agent*\n\n"
     "*Getting started*\n"
-    "1. Run /start and answer four questions: timezone, pushes per day (6–12), "
-    "active window (HH:MM–HH:MM), tone.\n"
+    "1. Run /start and answer five questions: timezone, pushes per day (6–12), "
+    "active window (HH:MM–HH:MM), tone, target language for /translate.\n"
     "2. Add words with /add <word or phrase>. The bot sends short snippets "
     "using those words at random times inside your window.\n"
     "3. Tap ✅ knew / ❌ forgot on each push — ratings drive FSRS spaced "
@@ -368,6 +370,45 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(body) > MAX_MSG_LEN - len(header) - 32:
         body = body[: MAX_MSG_LEN - len(header) - 32] + "\n…"
     await update.message.reply_text(f"{header}\n{body}")
+
+
+async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    settings = config_flow.load_settings(conn, chat_id)
+    if settings is None:
+        await update.message.reply_text(
+            "Run /start first so I know which language to translate into."
+        )
+        return
+
+    # Two input modes: explicit args, or a reply to another message.
+    args_text = " ".join(context.args or []).strip()
+    if args_text:
+        source_text = args_text
+    elif update.message.reply_to_message is not None:
+        replied = update.message.reply_to_message
+        source_text = (replied.text or replied.caption or "").strip()
+    else:
+        source_text = ""
+
+    if not source_text:
+        await update.message.reply_text(
+            "Usage: /translate <text>, or reply to a message with /translate."
+        )
+        return
+
+    try:
+        translated = await asyncio.to_thread(
+            translator.translate, source_text, settings.target_lang
+        )
+    except Exception as e:  # noqa: BLE001 — surface the reason to the user
+        log.error("translate failed for chat %s: %s", chat_id, e)
+        await update.message.reply_text(f"⚠️ Translation failed: {e}")
+        return
+    await update.message.reply_text(translated or "⚠️ Empty translation.")
 
 
 async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -605,6 +646,7 @@ def main() -> None:
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
+    app.add_handler(CommandHandler("translate", cmd_translate))
 
     app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
