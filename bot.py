@@ -256,7 +256,7 @@ COMMANDS: list[tuple[str, str]] = [
 HELP_TEXT = (
     "🤖 *Gemma vocab agent*\n\n"
     "*Getting started*\n"
-    "1. Run /start and answer four questions: timezone, pushes per day (1–8), "
+    "1. Run /start and answer four questions: timezone, pushes per day (6–12), "
     "active window (HH:MM–HH:MM), tone.\n"
     "2. Add words with /add <word or phrase>. The bot sends short snippets "
     "using those words at random times inside your window.\n"

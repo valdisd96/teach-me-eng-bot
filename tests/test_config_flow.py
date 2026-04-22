@@ -28,7 +28,9 @@ def test_validate_pushes_accepts_range() -> None:
 
 
 def test_validate_pushes_rejects_out_of_range() -> None:
-    for bad in ("0", "9", "-1", "lots"):
+    below = str(config_flow.MIN_PUSHES - 1)
+    above = str(config_flow.MAX_PUSHES + 1)
+    for bad in (below, above, "0", "-1", "lots"):
         with pytest.raises(ValueError):
             config_flow.validate_pushes(bad)
 
@@ -58,7 +60,7 @@ def test_validate_tone_rejects_unknown() -> None:
 
 
 def _walk_happy_path(session: config_flow.ConfigSession) -> None:
-    for reply in ("Europe/Warsaw", "3", "09:00", "21:00", "mixed"):
+    for reply in ("Europe/Warsaw", "7", "09:00", "21:00", "mixed"):
         advanced, _ = session.submit(reply)
         assert advanced is True
 
@@ -70,7 +72,7 @@ def test_session_completes_with_valid_replies() -> None:
     assert s.done is True
     settings = s.settings()
     assert settings.tz == "Europe/Warsaw"
-    assert settings.pushes_per_day == 3
+    assert settings.pushes_per_day == 7
     assert settings.active_start == "09:00"
     assert settings.active_end == "21:00"
     assert settings.tone == "mixed"

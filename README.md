@@ -61,7 +61,7 @@ Per-chat scheduling settings (timezone, pushes/day, active window, tone) are col
 
 | Command | Description |
 |---|---|
-| `/start` | Walks a guided config: timezone → pushes/day (1–8) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed). Re-running overwrites settings; vocab is preserved. |
+| `/start` | Walks a guided config: timezone → pushes/day (6–12) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed). Re-running overwrites settings; vocab is preserved. |
 | `/clear` | Resets the chat's LLM history. Vocab and settings untouched. |
 | `/add <word or phrase>` | Add a word to this chat's vocab. |
 | `/remove <word or phrase>` | Remove a word. |
