@@ -109,6 +109,8 @@ histories: dict[int, list[dict]] = {}
 conv_paths: dict[int, Path] = {}
 # Chats currently walking the /start config steps.
 sessions: dict[int, config_flow.ConfigSession] = {}
+# Tokens → (chat_id, word) for pending /translate "Add to vocab" buttons.
+pending_vocab: translator.PendingVocab = translator.PendingVocab()
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -245,7 +247,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("remove", "Remove a word or phrase from vocab"),
     ("list", "List vocab words (optionally filter by substring)"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
-    ("translate", "Translate args; the English side of the pair (source or reverse-translated) is added to vocab"),
+    ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -442,19 +444,22 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("⚠️ Empty translation.", do_quote=True)
         return
 
-    # Both directions feed English into vocab: reverse adds the translation,
-    # forward adds the source. Word-count cap is applied to the user's input
-    # in both cases.
+    # Both directions can feed English into vocab (reverse adds the translation,
+    # forward adds the source), but we defer the write until the user taps the
+    # button. Long phrases still short-circuit with an inline note — same 5-word
+    # cap on the user's input as before.
     to_add = translator.vocab_target(source_text, translated, reverse)
     word_count = len(source_text.split())
-    added = False
-    if word_count <= 5:
-        try:
-            added = vocab.add_word(conn, chat_id, to_add)
-        except ValueError:
-            added = False
-    note = translator.format_vocab_note(word_count, added)
-    await update.message.reply_text(f"{translated}\n{note}", do_quote=True)
+    if word_count > 5:
+        note = translator.format_vocab_note(word_count, added=False)
+        await update.message.reply_text(f"{translated}\n{note}", do_quote=True)
+        return
+
+    token = pending_vocab.register(chat_id, to_add)
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("➕ Add to vocab", callback_data=f"av:{token}")]]
+    )
+    await update.message.reply_text(translated, reply_markup=kb, do_quote=True)
 
 
 async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -529,6 +534,39 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         append_turn(chat_id, "explain", f"[{tag_word}] {explanation}")
     except Exception as e:  # noqa: BLE001
         log.error("failed to send explanation for chat %s: %s", chat_id, e)
+
+
+async def on_add_vocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, token_s = query.data.split(":")
+        token = int(token_s)
+    except (ValueError, AttributeError):
+        log.warning("Malformed av callback: %r", query.data)
+        return
+    entry = pending_vocab.pop(token)
+    if entry is None:
+        # Bot restart orphaned the token, or the registry evicted it.
+        label = "⚠️ expired"
+    else:
+        entry_chat_id, word = entry
+        try:
+            added = vocab.add_word(conn, entry_chat_id, word)
+        except ValueError:
+            added = False
+        label = "added to vocab ✅" if added else "already in vocab"
+    try:
+        await query.edit_message_reply_markup(
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton(label, callback_data="noop")]]
+            )
+        )
+    except BadRequest:
+        pass  # message too old or already replaced
 
 
 async def on_resetvocab_confirm(
@@ -697,6 +735,7 @@ def main() -> None:
 
     app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
+    app.add_handler(CallbackQueryHandler(on_add_vocab, pattern=r"^av:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
