@@ -121,6 +121,43 @@ def test_scan_mentions_empty_inputs() -> None:
     assert vocab.scan_mentions("", [(1, "hello")]) == []
 
 
+def test_bold_matches_empty_text() -> None:
+    assert vocab.bold_matches("", ["foo"]) == ""
+
+
+def test_bold_matches_no_words_just_escapes() -> None:
+    assert vocab.bold_matches("a < b & c", []) == "a &lt; b &amp; c"
+
+
+def test_bold_matches_wraps_substring_case_insensitive() -> None:
+    out = vocab.bold_matches("It was Serendipity, brief.", ["serendipity"])
+    assert out == "It was <b>Serendipity</b>, brief."
+
+
+def test_bold_matches_escapes_html_chars_outside_match() -> None:
+    out = vocab.bold_matches("<cat> & dog", ["cat"])
+    assert out == "&lt;<b>cat</b>&gt; &amp; dog"
+
+
+def test_bold_matches_longer_word_wins_on_overlap() -> None:
+    out = vocab.bold_matches("concatenate things", ["cat", "concatenate"])
+    assert out == "<b>concatenate</b> things"
+
+
+def test_bold_matches_multiple_non_overlapping() -> None:
+    out = vocab.bold_matches("cat dog cat", ["cat", "dog"])
+    assert out == "<b>cat</b> <b>dog</b> <b>cat</b>"
+
+
+def test_bold_matches_phrase() -> None:
+    out = vocab.bold_matches("She did it on the fly today.", ["on the fly"])
+    assert out == "She did it <b>on the fly</b> today."
+
+
+def test_bold_matches_ignores_empty_word_entries() -> None:
+    assert vocab.bold_matches("hello world", ["", "world"]) == "hello <b>world</b>"
+
+
 def test_bump_mentions_increments_and_timestamps(conn: sqlite3.Connection) -> None:
     vocab.add_word(conn, CHAT, "placid")
     wid = conn.execute("SELECT id FROM words").fetchone()["id"]
