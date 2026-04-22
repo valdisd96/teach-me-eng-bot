@@ -14,13 +14,14 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "vocab.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
-    chat_id        INTEGER PRIMARY KEY,
-    tz             TEXT    NOT NULL,
-    pushes_per_day INTEGER NOT NULL DEFAULT 3,
-    active_start   TEXT    NOT NULL DEFAULT '09:00',
-    active_end     TEXT    NOT NULL DEFAULT '21:00',
-    tone           TEXT    NOT NULL DEFAULT 'mixed',
-    created_at     TEXT    NOT NULL
+    chat_id          INTEGER PRIMARY KEY,
+    tz               TEXT    NOT NULL,
+    pushes_per_day   INTEGER NOT NULL DEFAULT 3,
+    active_start     TEXT    NOT NULL DEFAULT '09:00',
+    active_end       TEXT    NOT NULL DEFAULT '21:00',
+    tone             TEXT    NOT NULL DEFAULT 'mixed',
+    translate_target TEXT    NOT NULL DEFAULT 'ru',
+    created_at       TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS words (
@@ -80,3 +81,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     if "step" not in _column_names(conn, "words"):
         conn.execute("ALTER TABLE words ADD COLUMN step INTEGER")
+    if "translate_target" not in _column_names(conn, "chats"):
+        # Existing chats get 'ru' so /translate works before they re-run /start.
+        conn.execute(
+            "ALTER TABLE chats ADD COLUMN translate_target TEXT NOT NULL DEFAULT 'ru'"
+        )

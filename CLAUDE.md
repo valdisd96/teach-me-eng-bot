@@ -43,13 +43,14 @@ Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are
 
 | Command | Purpose |
 |---|---|
-| `/start` | Walks a guided config: timezone → pushes/day (6–12) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed). Overwrites previous settings; vocab is preserved. |
+| `/start` | Walks a guided config: timezone → pushes/day (6–12) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed) → target language (for `/translate`). Overwrites previous settings; vocab is preserved. |
 | `/help` | Shows a getting-started intro and lists all commands with descriptions. |
 | `/clear` | Resets the chat history (LLM memory) for this chat. Vocab and settings untouched. |
 | `/add <word or phrase>` | Add a word to this chat's vocab. Normalized to lowercased+stripped form. |
 | `/remove <word or phrase>` | Remove by exact (normalized) match. |
 | `/list [substring]` | List all vocab words (least-mentioned first), or only those matching a substring. |
 | `/resetvocab` | Wipes the chat's vocabulary (with a confirm button). |
+| `/translate <text>` | Google-translate the args (or, if sent as a reply, the replied message) into the chat's configured target language. Does **not** invoke the LLM. |
 | `/model` | Shows the llama.cpp endpoint and health status. |
 
 Plain (non-slash) messages go through the **just-talk** flow: the chat history is passed to the model with the current vocab list injected into the system prompt as soft hints. Any vocab words that appear literally in the reply bump `mention_count` and update `last_used_at`.
@@ -64,7 +65,8 @@ Code is split into focused modules (entrypoint is `bot.py`):
 - **`llm.py`** — llama.cpp HTTP client. `stream_chat()` for live edits, `chat()` one-shot for pushes, `health()` for `/model`. SSE/completion parsing is factored into pure helpers.
 - **`vocab.py`** — vocabulary CRUD, literal mention scanning, FSRS rating (`rate_word`), and the weighted-random `select_word`. Uses `py-fsrs` with `desired_retention=0.95` and `maximum_interval=7d` so review intervals stay tight.
 - **`prompts.py`** — tone-flavoured push templates and the just-talk system-prompt composer that appends the chat's vocab as soft hints.
-- **`config_flow.py`** — `Settings` dataclass + `ConfigSession` state machine for `/start`; per-step validators (IANA tz, 6–12 pushes, HH:MM, known tone); `save_settings` / `load_settings` upsert against the `chats` table.
+- **`config_flow.py`** — `Settings` dataclass + `ConfigSession` state machine for `/start`; per-step validators (IANA tz, 6–12 pushes, HH:MM, known tone, known target language via `translator.normalize_target`); `save_settings` / `load_settings` upsert against the `chats` table.
+- **`translator.py`** — thin wrapper around `deep_translator.GoogleTranslator` for `/translate`. `normalize_target` maps a name or ISO code to an ISO code (no network); `translate` does the Google call. Explicitly bypasses the LLM because Gemma's Russian translations are weak.
 - **`scheduler.py`** — `plan_push_times` (equal-bucket sampling with half-gap edge buffers), `compose_push` (select + LLM call + retry once if the word didn't appear literally), `log_push` / `mark_rated`, and `PushRunner` wrapping `AsyncIOScheduler` with per-chat daily re-planning at 00:01 local.
 - **`db.py`** — SQLite schema (`chats`, `words`, `push_log`) with FSRS columns on `words`; `connect()` sets WAL + `PRAGMA foreign_keys=ON`; `init_db()` applies forward-only column migrations.
 - **`tests/`** — pytest suite covering schema constraints, vocab CRUD, mention scanning, FSRS state transitions, selection-weight math, deterministic weighted sampling, prompt composition, tz/time validators, config session transitions, plan_push_times determinism + min-gap, compose_push retry paths, push_log roundtrip, PushRunner job registration.
@@ -85,7 +87,7 @@ Each factor lives in `[0, 1]`, lifted to `[1, 2]` so no single signal dominates.
 
 - Path: `data/vocab.db` (git-ignored). Created on first run.
 - Tables:
-  - `chats(chat_id PK, tz, pushes_per_day, active_start, active_end, tone, created_at)`
+  - `chats(chat_id PK, tz, pushes_per_day, active_start, active_end, tone, translate_target, created_at)`
   - `words(id PK, chat_id FK, text, added_at, mention_count, last_used_at, stability, difficulty, state, step, due, reps, lapses, last_review, UNIQUE(chat_id, text))`
   - `push_log(id PK, chat_id, sent_at, tg_message_id, word_ids_json, rated)`
 - Cascade-delete: removing a chat drops its words and push_log entries.

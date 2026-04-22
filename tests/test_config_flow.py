@@ -60,7 +60,7 @@ def test_validate_tone_rejects_unknown() -> None:
 
 
 def _walk_happy_path(session: config_flow.ConfigSession) -> None:
-    for reply in ("Europe/Warsaw", "7", "09:00", "21:00", "mixed"):
+    for reply in ("Europe/Warsaw", "7", "09:00", "21:00", "mixed", "russian"):
         advanced, _ = session.submit(reply)
         assert advanced is True
 
@@ -76,6 +76,17 @@ def test_session_completes_with_valid_replies() -> None:
     assert settings.active_start == "09:00"
     assert settings.active_end == "21:00"
     assert settings.tone == "mixed"
+    assert settings.target_lang == "ru"
+
+
+def test_validate_target_lang_accepts_code_and_name() -> None:
+    assert config_flow.validate_target_lang("ru") == "ru"
+    assert config_flow.validate_target_lang("Russian") == "ru"
+
+
+def test_validate_target_lang_rejects_unknown() -> None:
+    with pytest.raises(ValueError):
+        config_flow.validate_target_lang("klingon")
 
 
 def test_session_stays_on_step_on_invalid_input() -> None:
@@ -115,6 +126,7 @@ def test_save_and_load_settings_roundtrip(conn: sqlite3.Connection) -> None:
         active_start="08:00",
         active_end="22:00",
         tone="funny",
+        target_lang="ru",
     )
     config_flow.save_settings(conn, 123, s)
     loaded = config_flow.load_settings(conn, 123)
@@ -122,8 +134,8 @@ def test_save_and_load_settings_roundtrip(conn: sqlite3.Connection) -> None:
 
 
 def test_save_settings_upserts(conn: sqlite3.Connection) -> None:
-    first = config_flow.Settings("UTC", 3, "09:00", "21:00", "mixed")
-    second = config_flow.Settings("Europe/Warsaw", 5, "08:30", "23:00", "scary")
+    first = config_flow.Settings("UTC", 3, "09:00", "21:00", "mixed", "ru")
+    second = config_flow.Settings("Europe/Warsaw", 5, "08:30", "23:00", "scary", "es")
     config_flow.save_settings(conn, 1, first)
     config_flow.save_settings(conn, 1, second)
     loaded = config_flow.load_settings(conn, 1)
