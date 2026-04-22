@@ -51,7 +51,7 @@ Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are
 | `/list [substring]` | List all vocab words (least-mentioned first), or only those matching a substring. |
 | `/resetvocab` | Wipes the chat's vocabulary (with a confirm button). |
 | `/translate <text>` | Google-translate the args (or, if sent as a reply, the replied message) into the chat's configured target language. Does **not** invoke the LLM. |
-| `/model` | Shows the llama.cpp endpoint and health status. |
+| `/status` | Host diagnostics (hardware, OS, load, temp, disk free), vocab count for the chat, llama.cpp endpoint/health, and a short model bench (chars + tok/s, `model not responding` on 30 s timeout). |
 
 Plain (non-slash) messages go through the **just-talk** flow: the chat history is passed to the model with the current vocab list injected into the system prompt as soft hints. Any vocab words that appear literally in the reply bump `mention_count` and update `last_used_at`.
 
@@ -62,7 +62,8 @@ Scheduled **pushes** send 1 short snippet using 1 vocab word at a time, in the c
 Code is split into focused modules (entrypoint is `bot.py`):
 
 - **`bot.py`** — python-telegram-bot wiring. Command/callback/message handlers, scheduler bootstrap, transcript/history management, DB connection lifecycle.
-- **`llm.py`** — llama.cpp HTTP client. `stream_chat()` for live edits, `chat()` one-shot for pushes, `health()` for `/model`. SSE/completion parsing is factored into pure helpers.
+- **`llm.py`** — llama.cpp HTTP client. `stream_chat()` for live edits, `chat()` one-shot for pushes, `health()` and `bench()` for `/status`. SSE/completion parsing is factored into pure helpers.
+- **`sysinfo.py`** — pure readers for host diagnostics used by `/status` (hardware, OS, load, temp, disk free). Each reader has an injectable dependency and a safe fallback so /status works off-Pi too.
 - **`vocab.py`** — vocabulary CRUD, literal mention scanning, FSRS rating (`rate_word`), and the weighted-random `select_word`. Uses `py-fsrs` with `desired_retention=0.95` and `maximum_interval=7d` so review intervals stay tight.
 - **`prompts.py`** — tone-flavoured push templates and the just-talk system-prompt composer that appends the chat's vocab as soft hints.
 - **`config_flow.py`** — `Settings` dataclass + `ConfigSession` state machine for `/start`; per-step validators (IANA tz, 6–12 pushes, HH:MM, known tone, known target language via `translator.normalize_target`); `save_settings` / `load_settings` upsert against the `chats` table.

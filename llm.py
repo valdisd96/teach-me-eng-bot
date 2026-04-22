@@ -13,8 +13,10 @@ they can be unit-tested without standing up an HTTP mock.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import AsyncIterator
+import time
+from typing import AsyncIterator, Awaitable, Callable
 
 import httpx
 
@@ -101,3 +103,36 @@ async def health() -> str:
             return r.json().get("status", "unknown")
     except Exception as e:  # noqa: BLE001 — surface the reason verbatim to the user
         return f"unreachable ({e})"
+
+
+_BENCH_PROMPT = [{"role": "user", "content": "Reply with one short sentence."}]
+
+
+async def bench(
+    *,
+    chat_fn: Callable[..., Awaitable[str]] | None = None,
+    timeout: float = 30.0,
+    now: Callable[[], float] = time.monotonic,
+) -> str:
+    """Run a tiny prompt through the model and return a one-line perf summary.
+
+    On timeout returns ``"model not responding"``; on other errors returns a
+    short ``"error: <ExceptionType>"`` string. Injected collaborators keep this
+    unit-testable without an HTTP server.
+    """
+    if chat_fn is None:
+        chat_fn = chat
+    t0 = now()
+    try:
+        text = await asyncio.wait_for(
+            chat_fn(_BENCH_PROMPT, max_tokens=32, temperature=0.2),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return "model not responding"
+    except Exception as e:  # noqa: BLE001 — surface the class name to the user
+        return f"error: {type(e).__name__}"
+    elapsed = now() - t0
+    chars = len(text)
+    tok_per_s = (chars / 4) / elapsed if elapsed > 0 else 0.0
+    return f"{chars} chars in {elapsed:.1f}s (~{tok_per_s:.1f} tok/s)"
