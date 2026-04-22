@@ -377,7 +377,11 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         + (f" matching '{needle}'" if needle else "")
         + ":"
     )
-    lines = [f"• {r['text']} (seen {r['mention_count']}×)" for r in rows]
+    scores = vocab.compute_scores(rows)
+    lines = [
+        f"• {r['text']} (seen {r['mention_count']}×, score {s})"
+        for r, s in zip(rows, scores)
+    ]
     # Telegram message cap — truncate gracefully.
     body = "\n".join(lines)
     if len(body) > MAX_MSG_LEN - len(header) - 32:

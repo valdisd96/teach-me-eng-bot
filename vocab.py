@@ -227,6 +227,24 @@ def compute_weight(row: sqlite3.Row, now: datetime.datetime) -> float:
     return (1 + forget_prob) * (1 + recency_boost) * (1 + rarity_boost)
 
 
+def compute_scores(
+    rows: list[sqlite3.Row],
+    now: datetime.datetime | None = None,
+) -> list[int]:
+    """Normalize per-row weights to 0..100 integers against the list's max.
+
+    Empty input returns []. If all weights tie, every row scores 100.
+    """
+    if not rows:
+        return []
+    now = now or _now_dt()
+    weights = [compute_weight(r, now) for r in rows]
+    top = max(weights)
+    if top <= 0:
+        return [0] * len(rows)
+    return [round(w / top * 100) for w in weights]
+
+
 def select_word(
     conn: sqlite3.Connection,
     chat_id: int,

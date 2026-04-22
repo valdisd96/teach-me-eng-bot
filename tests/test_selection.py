@@ -123,6 +123,36 @@ def test_weight_drops_for_just_learned_word(conn: sqlite3.Connection) -> None:
     assert w < 4.5
 
 
+# --- compute_scores ----------------------------------------------------------
+
+
+def test_compute_scores_empty_returns_empty() -> None:
+    assert vocab.compute_scores([]) == []
+
+
+def test_compute_scores_single_row_is_full(conn: sqlite3.Connection) -> None:
+    vocab.add_word(conn, CHAT, "solo")
+    rows = conn.execute("SELECT * FROM words WHERE chat_id=?", (CHAT,)).fetchall()
+    assert vocab.compute_scores(rows) == [100]
+
+
+def test_compute_scores_normalizes_against_max(conn: sqlite3.Connection) -> None:
+    # fresh unrated → weight ≈ 8 (top)
+    # mastered (just Good-rated) → weight < 4.5
+    vocab.add_word(conn, CHAT, "fresh")
+    vocab.add_word(conn, CHAT, "mastered")
+    vocab.rate_word(conn, _wid(conn, "mastered"), Rating.Good)
+
+    rows = conn.execute(
+        "SELECT * FROM words WHERE chat_id=? ORDER BY text", (CHAT,)
+    ).fetchall()
+    scores = vocab.compute_scores(rows, datetime.datetime.now(UTC))
+    by_text = dict(zip([r["text"] for r in rows], scores))
+    assert by_text["fresh"] == 100
+    assert 0 < by_text["mastered"] < 100
+    assert by_text["mastered"] < by_text["fresh"]
+
+
 # --- select_word -------------------------------------------------------------
 
 
