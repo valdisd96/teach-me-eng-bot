@@ -43,7 +43,7 @@ Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are
 
 | Command | Purpose |
 |---|---|
-| `/start` | Walks a guided config: timezone → pushes/day (1–8) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed). Overwrites previous settings; vocab is preserved. |
+| `/start` | Walks a guided config: timezone → pushes/day (6–12) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed). Overwrites previous settings; vocab is preserved. |
 | `/help` | Shows a getting-started intro and lists all commands with descriptions. |
 | `/clear` | Resets the chat history (LLM memory) for this chat. Vocab and settings untouched. |
 | `/add <word or phrase>` | Add a word to this chat's vocab. Normalized to lowercased+stripped form. |
@@ -64,7 +64,7 @@ Code is split into focused modules (entrypoint is `bot.py`):
 - **`llm.py`** — llama.cpp HTTP client. `stream_chat()` for live edits, `chat()` one-shot for pushes, `health()` for `/model`. SSE/completion parsing is factored into pure helpers.
 - **`vocab.py`** — vocabulary CRUD, literal mention scanning, FSRS rating (`rate_word`), and the weighted-random `select_word`. Uses `py-fsrs` with `desired_retention=0.95` and `maximum_interval=7d` so review intervals stay tight.
 - **`prompts.py`** — tone-flavoured push templates and the just-talk system-prompt composer that appends the chat's vocab as soft hints.
-- **`config_flow.py`** — `Settings` dataclass + `ConfigSession` state machine for `/start`; per-step validators (IANA tz, 1–8 pushes, HH:MM, known tone); `save_settings` / `load_settings` upsert against the `chats` table.
+- **`config_flow.py`** — `Settings` dataclass + `ConfigSession` state machine for `/start`; per-step validators (IANA tz, 6–12 pushes, HH:MM, known tone); `save_settings` / `load_settings` upsert against the `chats` table.
 - **`scheduler.py`** — `plan_push_times` (equal-bucket sampling with half-gap edge buffers), `compose_push` (select + LLM call + retry once if the word didn't appear literally), `log_push` / `mark_rated`, and `PushRunner` wrapping `AsyncIOScheduler` with per-chat daily re-planning at 00:01 local.
 - **`db.py`** — SQLite schema (`chats`, `words`, `push_log`) with FSRS columns on `words`; `connect()` sets WAL + `PRAGMA foreign_keys=ON`; `init_db()` applies forward-only column migrations.
 - **`tests/`** — pytest suite covering schema constraints, vocab CRUD, mention scanning, FSRS state transitions, selection-weight math, deterministic weighted sampling, prompt composition, tz/time validators, config session transitions, plan_push_times determinism + min-gap, compose_push retry paths, push_log roundtrip, PushRunner job registration.

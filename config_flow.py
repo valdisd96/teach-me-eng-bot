@@ -14,8 +14,8 @@ from dataclasses import dataclass, asdict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 TONES = ("funny", "motivational", "scary", "bright", "mixed")
-MIN_PUSHES = 1
-MAX_PUSHES = 8
+MIN_PUSHES = 6
+MAX_PUSHES = 12
 
 
 @dataclass
