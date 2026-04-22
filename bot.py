@@ -241,7 +241,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("remove", "Remove a word or phrase from vocab"),
     ("list", "List vocab words (optionally filter by substring)"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
-    ("translate", "Translate args, or reply to a message with /translate"),
+    ("translate", "Translate args; input in your target language is reverse-translated to English and added to vocab"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -415,9 +415,13 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
+    reverse = translator.is_target_script(source_text, settings.target_lang)
+    target_iso = "en" if reverse else settings.target_lang
+    source_iso = settings.target_lang if reverse else "auto"
+
     try:
         translated = await asyncio.to_thread(
-            translator.translate, source_text, settings.target_lang
+            translator.translate, source_text, target_iso, source_iso
         )
     except Exception as e:  # noqa: BLE001 — surface the reason to the user
         log.error("translate failed for chat %s: %s", chat_id, e)
@@ -425,9 +429,26 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"⚠️ Translation failed: {e}", do_quote=True
         )
         return
-    await update.message.reply_text(
-        translated or "⚠️ Empty translation.", do_quote=True
-    )
+
+    if not translated:
+        await update.message.reply_text("⚠️ Empty translation.", do_quote=True)
+        return
+
+    if not reverse:
+        await update.message.reply_text(translated, do_quote=True)
+        return
+
+    # Reverse flow: add the English translation to this chat's vocab if the
+    # original phrase is short enough. Count words on the *original* input.
+    word_count = len(source_text.split())
+    added = False
+    if word_count <= 5:
+        try:
+            added = vocab.add_word(conn, chat_id, translated)
+        except ValueError:
+            added = False
+    note = translator.format_reverse_note(word_count, added)
+    await update.message.reply_text(f"{translated}\n{note}", do_quote=True)
 
 
 async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
