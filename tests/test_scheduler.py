@@ -297,6 +297,96 @@ def test_compose_explanation_returns_none_on_empty_llm_reply(conn: sqlite3.Conne
     assert out is None
 
 
+# --- compose_translation -----------------------------------------------------
+
+
+def test_compose_translation_returns_stripped_text(conn: sqlite3.Connection) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "ephemeral")
+    row = conn.execute(
+        "SELECT id FROM words WHERE chat_id = ?", (CHAT,)
+    ).fetchone()
+
+    seen: list[tuple[str, str]] = []
+
+    async def fake_translate(word: str, target: str) -> str:
+        seen.append((word, target))
+        return "  эфемерный  \n"
+
+    out = asyncio.run(
+        scheduler.compose_translation(
+            conn, row["id"], "ru", translate_fn=fake_translate
+        )
+    )
+    assert out == "эфемерный"
+    assert seen == [("ephemeral", "ru")]
+
+
+def test_compose_translation_returns_none_for_unknown_word(conn: sqlite3.Connection) -> None:
+    async def fake_translate(word: str, target: str) -> str:
+        raise AssertionError("translator should not be called")
+
+    out = asyncio.run(
+        scheduler.compose_translation(
+            conn, 99999, "ru", translate_fn=fake_translate
+        )
+    )
+    assert out is None
+
+
+def test_compose_translation_returns_none_on_empty_result(conn: sqlite3.Connection) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "placid")
+    row = conn.execute(
+        "SELECT id FROM words WHERE chat_id = ?", (CHAT,)
+    ).fetchone()
+
+    async def fake_blank(word: str, target: str) -> str:
+        return "  \n"
+
+    out = asyncio.run(
+        scheduler.compose_translation(
+            conn, row["id"], "ru", translate_fn=fake_blank
+        )
+    )
+    assert out is None
+
+
+# --- format_explanation_reply ------------------------------------------------
+
+
+def test_format_explanation_reply_without_translation_is_passthrough() -> None:
+    assert (
+        scheduler.format_explanation_reply("Means lasting briefly.", None)
+        == "Means lasting briefly."
+    )
+    # Empty string is treated like None — no divider noise on a missing translation.
+    assert (
+        scheduler.format_explanation_reply("Means lasting briefly.", "")
+        == "Means lasting briefly."
+    )
+
+
+def test_format_explanation_reply_appends_divider_and_translation() -> None:
+    out = scheduler.format_explanation_reply(
+        "Means <b>lasting</b> briefly.", "эфемерный"
+    )
+    # Two blank lines + a horizontal rule visually separate the two blocks.
+    assert out == (
+        "Means <b>lasting</b> briefly.\n\n"
+        "──────────\n"
+        "<i>эфемерный</i>"
+    )
+
+
+def test_format_explanation_reply_escapes_translation_html() -> None:
+    out = scheduler.format_explanation_reply("ok", "<script>x</script>")
+    # The translation must be HTML-escaped — Telegram parses the reply as HTML
+    # and a stray '<' would either fail to render or be interpreted as a tag.
+    assert "&lt;script&gt;x&lt;/script&gt;" in out
+    assert "<script>" not in out
+
+
 # --- log_push / mark_rated ---------------------------------------------------
 
 
