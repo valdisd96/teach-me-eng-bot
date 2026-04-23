@@ -17,6 +17,7 @@ caller's job so bot.py can include the Telegram message id.
 from __future__ import annotations
 
 import datetime
+import html
 import json
 import logging
 import random
@@ -93,6 +94,7 @@ def plan_push_times(
 
 # Injected type aliases for clarity.
 LlmChat = Callable[[list[dict]], Awaitable[str]]
+TranslateFn = Callable[[str, str], Awaitable[str]]
 
 
 async def compose_push(
@@ -149,6 +151,51 @@ async def compose_explanation(
         return None
     text = (await llm_chat(prompts.explain_messages(row["text"]))).strip()
     return text or None
+
+
+async def compose_translation(
+    conn: sqlite3.Connection,
+    word_id: int,
+    target: str,
+    *,
+    translate_fn: TranslateFn,
+) -> str | None:
+    """Translate the rated word into `target` (ISO code) for the ❌-forgot reply.
+
+    Mirrors `compose_explanation`'s contract: returns the stripped translation,
+    or None when the word is gone or the result is empty. Callers wrap the
+    sync `translator.translate` in `asyncio.to_thread` to satisfy `translate_fn`.
+    """
+    row = conn.execute(
+        "SELECT text FROM words WHERE id = ?", (word_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    text = (await translate_fn(row["text"], target)).strip()
+    return text or None
+
+
+# Visual divider between the LLM explanation and the single-word translation.
+# A box-drawing rule keeps the two sections distinct without leaning on emoji.
+_EXPLAIN_DIVIDER = "──────────"
+
+
+def format_explanation_reply(
+    explanation_html: str, translation: str | None
+) -> str:
+    """Compose the ❌-forgot reply body — explanation, then optional translation.
+
+    `explanation_html` is already HTML-safe (typically from `vocab.bold_matches`).
+    `translation` is plain text and gets HTML-escaped here. When translation is
+    None or empty the reply is just the explanation, unchanged.
+    """
+    if not translation:
+        return explanation_html
+    return (
+        f"{explanation_html}\n\n"
+        f"{_EXPLAIN_DIVIDER}\n"
+        f"<i>{html.escape(translation)}</i>"
+    )
 
 
 def log_push(

@@ -529,9 +529,29 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     formatted = vocab.bold_matches(
         explanation, [tag_word] if row is not None else []
     )
+
+    # Tack on a single-word translation into the chat's configured target
+    # language. A failure here mustn't drop the explanation itself.
+    translation: str | None = None
+    settings = config_flow.load_settings(conn, chat_id)
+    if settings is not None:
+        try:
+            translation = await sched_module.compose_translation(
+                conn,
+                word_id,
+                settings.target_lang,
+                translate_fn=lambda w, t: asyncio.to_thread(
+                    translator.translate, w, t, "en"
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error("translate for explain failed for word %s: %s", word_id, e)
+
+    body = sched_module.format_explanation_reply(formatted, translation)
+    transcript = explanation if not translation else f"{explanation}\n→ {translation}"
     try:
-        await query.message.reply_text(formatted, parse_mode="HTML")
-        append_turn(chat_id, "explain", f"[{tag_word}] {explanation}")
+        await query.message.reply_text(body, parse_mode="HTML", do_quote=True)
+        append_turn(chat_id, "explain", f"[{tag_word}] {transcript}")
     except Exception as e:  # noqa: BLE001
         log.error("failed to send explanation for chat %s: %s", chat_id, e)
 
