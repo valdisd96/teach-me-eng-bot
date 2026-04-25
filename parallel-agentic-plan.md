@@ -62,13 +62,22 @@ gh issue list \
 ## Tasks — one PR per task
 
 ### Task 1 — Worktree infrastructure
+
+**Status:** Done in [#32](https://github.com/valdisd96/gemma-rpi-agent/pull/32). Implementation notes worth carrying into later tasks:
+- Slot number is recorded in `<git-dir>/wt-slot` (the worktree's own git metadata directory), not in the working tree. Future scripts that want to read the slot of a worktree at `<path>` should do `cat "$(git -C <path> rev-parse --absolute-git-dir)/wt-slot"`.
+- `wt.sh create` always cuts `-b <branch>` from `main` — Task 4's spawn script can rely on this.
+- `data/` is created empty; `vocab.db` is materialised by the bot on first run, so no per-worktree DB seeding is needed.
+- If `env/slot<N>.env` is missing, `wt.sh` seeds it from `.env.example`. Task 2 should overwrite/extend that file with real `TELEGRAM_TOKEN` + `OPENROUTER_API_KEY` values rather than recreate it.
+- `.gitignore` was tightened from `.venv/` to `.venv` so the symlink form drops out of `git status` inside worktrees. Anything else wt.sh adds to a worktree is either gitignored (`.env`, `.venv`, `data/`) or kept outside the working tree (`<git-dir>/wt-slot`).
+- `read -p` only echoes prompts on a TTY; the destroy script prints its warnings to stderr ahead of the read so non-interactive callers (CI, agent scripts) still see the reason for a failed prompt.
+
 **Deliverables**
-- `scripts/wt.sh create <branch>` — `git worktree add ./worktrees/<branch> -b <branch>`, fresh `data/vocab.db`, `.venv` symlink to main `.venv` (fast), copies `.env` from matching slot.
+- `scripts/wt.sh create <branch> [slot]` — `git worktree add ./worktrees/<branch> -b <branch> main`, empty `data/` dir, `.venv` symlink to main `.venv` (fast), copies `env/slot<N>.env` → `.env`.
 - `scripts/wt.sh destroy <branch>` — prompts if branch has uncommitted/unpushed work; then `git worktree remove` + cleanup.
 - `scripts/wt.sh list` — wraps `git worktree list` with slot info.
 - `.gitignore`: add `worktrees/` and `env/slot*.env`.
 
-**Risk:** Python `.venv` isn't trivially portable across worktrees. Symlink approach works because this repo has no path-sensitive native deps — verify during implementation.
+**Risk:** Python `.venv` isn't trivially portable across worktrees. Symlink approach verified in #32 — works for this repo because none of the deps in `requirements.txt` bake absolute paths into installed scripts/wheels.
 
 ### Task 2 — Dual-backend LLM + token pool
 **Deliverables**
