@@ -100,6 +100,16 @@ gh issue list \
 - Free-tier rate limits — not load-tested in #33; default model is `google/gemma-4-26b-a4b-it:free`, swap via `OPENROUTER_MODEL` if quotas bite.
 
 ### Task 3 — Label taxonomy + planner/clarify skills
+
+**Status:** Done in [#34](https://github.com/valdisd96/gemma-rpi-agent/pull/34). 22 labels live on the repo. Implementation notes for Task 4/5:
+- `scripts/setup-labels.sh` uses `gh label create --force`, so it's safe to re-run after schema edits — it updates colour/description in place.
+- Skills are tracked under `.claude/skills/` and auto-load in any Claude Code session opened against this repo. Worktrees inherit them via the normal checkout, so a worker agent in a worktree gets `clarify-issue` for free.
+- `plan-issue` deliberately **never** sets `state:in-progress` — that's the spawn script's job in Task 4. Same for `state:ready-for-review` / `state:needs-rework` (Task 5's `review-pr` owns those). The skill's "Hard rules" section enforces this.
+- Children created during decomposition stay at `state:needs-planning` (not `state:ready-for-parallel-work`) — each child gets its own planning pass so the user can re-scope before any agent picks them up.
+- `clarify-issue` requires the issue to already be `state:in-progress`; it explicitly forbids being invoked outside an active work session, and forbids speculative parallel work after the comment is posted.
+- `CLAUDE.md` got a short pointer at the workflow; full taxonomy stays here in the plan (one source of truth, easy to edit in one place).
+- The `openrouter/free` auto-router triggered a real bug in `llm._parse_completion` during smoke testing — `content: null` from reasoning-only models crashed `bench()`. Fixed in the same PR (`6b8731f`); regression test added.
+
 **Deliverables**
 - `scripts/setup-labels.sh` — idempotent `gh label create` for every label above (re-runnable).
 - `.claude/skills/plan-issue/SKILL.md` — given an issue number, read body, ask clarifying questions inline only if truly ambiguous; otherwise decompose:
@@ -108,7 +118,7 @@ gh issue list \
 - `.claude/skills/clarify-issue/SKILL.md` — when an agent hits genuine ambiguity, post a comment with the specific question and flip label to `state:clarification-needed`. Agent then stops and waits.
 - `CLAUDE.md`: document the state machine.
 
-**Risk:** Planner over-decomposing tiny issues. Skill needs a firm "prefer one issue when split-cost > benefit" rule.
+**Risk:** Planner over-decomposing tiny issues. Skill needs a firm "prefer one issue when split-cost > benefit" rule. Mitigated in `plan-issue/SKILL.md` via the explicit "Anti-decomposition rule" and three worked examples (single, multi, ambiguous).
 
 ### Task 4 — Spawn script & in-worktree `work-issue` skill
 **Deliverables**
