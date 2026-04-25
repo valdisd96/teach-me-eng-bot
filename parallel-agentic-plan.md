@@ -80,15 +80,24 @@ gh issue list \
 **Risk:** Python `.venv` isn't trivially portable across worktrees. Symlink approach verified in #32 — works for this repo because none of the deps in `requirements.txt` bake absolute paths into installed scripts/wheels.
 
 ### Task 2 — Dual-backend LLM + token pool
+
+**Status:** Code merged in [#33](https://github.com/valdisd96/gemma-rpi-agent/pull/33). Implementation notes to carry forward:
+- Backend selection lives in `llm._get_backend()`, which reads `LLM_BACKEND`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` from env on each call (not at import). Anything that needs to know the current backend should call this helper rather than re-derive it from env.
+- `LLM_BACKEND` matching is case-insensitive on the string `openrouter`. Anything else (including unset, empty, typos) falls back to the llama.cpp path — keeps the live Pi deployment immune to env-var noise.
+- Missing `OPENROUTER_API_KEY` while `LLM_BACKEND=openrouter` raises `RuntimeError` lazily on the first LLM call, not at startup. `bot.py` is intentionally not coupled to backend validation.
+- `health()` short-circuits for OpenRouter and returns `"openrouter (model=<name>)"` without a network round-trip — kept `/status` snappy and avoided burning the auth-key probe quota.
+- Slot env files (`env/slot1.env`, `env/slot2.env`) remain gitignored and per-machine. `wt.sh` from #32 seeds them from `.env.example`, so each new worktree starts with the right schema (TELEGRAM_TOKEN + the three OpenRouter keys) ready to fill in.
+- Tests use `httpx.MockTransport` patched onto `httpx.AsyncClient` via `monkeypatch` — useful pattern when Task 4/5 code needs to assert request shape without standing up a fake server.
+
 **Deliverables**
 - `env/slot1.env`, `env/slot2.env` (gitignored) each with its `TELEGRAM_TOKEN` + `OPENROUTER_API_KEY`.
 - `llm.py`: tiny dispatch — when `LLM_BACKEND=openrouter`, call `https://openrouter.ai/api/v1/chat/completions` with `model=google/gemma-4-26b-a4b-it:free`; otherwise current llama.cpp path.
 - `.env.example`: add `LLM_BACKEND`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, documented in `CLAUDE.md`.
-- Smoke: `python bot.py` with `LLM_BACKEND=openrouter` answers a real Telegram message.
+- Smoke: `python bot.py` with `LLM_BACKEND=openrouter` answers a real Telegram message. (Manual; deferred — needs a real Telegram + OpenRouter pair.)
 
 **Risks**
 - OpenRouter free-tier model differs from Gemma-4 on the Pi; responses will diverge. Use for smoke only, not prompt-tuning.
-- Free-tier rate limits — verify current caps during implementation.
+- Free-tier rate limits — not load-tested in #33; default model is `google/gemma-4-26b-a4b-it:free`, swap via `OPENROUTER_MODEL` if quotas bite.
 
 ### Task 3 — Label taxonomy + planner/clarify skills
 **Deliverables**
