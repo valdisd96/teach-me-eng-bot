@@ -87,7 +87,10 @@ def _parse_sse_delta(raw: str) -> str | None:
 
 
 def _parse_completion(payload: dict) -> str:
-    return payload["choices"][0]["message"].get("content", "")
+    # Some models (e.g. reasoning-only on the openrouter/free auto-router)
+    # return content: null on a 200; treat that the same as empty so callers
+    # always get a string.
+    return payload["choices"][0]["message"].get("content") or ""
 
 
 async def stream_chat(

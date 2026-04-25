@@ -80,6 +80,14 @@ def test_parse_completion_missing_content_returns_empty() -> None:
     assert llm._parse_completion(payload) == ""
 
 
+def test_parse_completion_null_content_returns_empty() -> None:
+    # OpenRouter's auto-router can land on reasoning-only models that emit
+    # `content: null` on a 200; bench() must still get a string back so its
+    # `len(text)` doesn't blow up.
+    payload = {"choices": [{"message": {"content": None}}]}
+    assert llm._parse_completion(payload) == ""
+
+
 def test_bench_formats_chars_elapsed_and_rate() -> None:
     clock = iter([100.0, 102.0])  # 2 s elapsed
 
