@@ -48,6 +48,9 @@ Slot numbers live in `<git-dir>/wt-slot` (per-worktree git metadata, invisible t
 | `TELEGRAM_TOKEN` | Yes | — |
 | `SYSTEM_PROMPT` | No | `"You are a friendly English tutor chatting casually with a learner. Use natural, everyday English. If they ask about grammar, vocabulary, or usage, explain briefly with a small example."` |
 | `ALLOWED_USER_IDS` | No | empty (allow all) — comma/whitespace-separated Telegram user IDs; if set, other users are silently ignored and logged |
+| `LLM_BACKEND` | No | `llama` — local llama.cpp on `http://127.0.0.1:8080`. Set to `openrouter` to route chat completions to OpenRouter instead (used by parallel-agent worktrees that can't reach the Pi). |
+| `OPENROUTER_API_KEY` | When `LLM_BACKEND=openrouter` | — sent as `Authorization: Bearer <key>`. Empty value with `LLM_BACKEND=openrouter` raises at the first LLM call. |
+| `OPENROUTER_MODEL` | No | `google/gemma-4-26b-a4b-it:free`. Free-tier model, used for smoke testing only — responses will diverge from the Pi's Gemma-4. |
 
 Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are collected via the `/start` conversation flow and stored in SQLite — they are **not** environment variables.
 
