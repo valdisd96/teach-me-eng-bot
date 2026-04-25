@@ -41,6 +41,10 @@ scripts/wt.sh list                     # git worktree list with the slot column
 
 Slot numbers live in `<git-dir>/wt-slot` (per-worktree git metadata, invisible to `git status`). `env/slot<N>.env` is gitignored; if missing, `create` seeds it from `.env.example` so the worktree always has a `.env` to start from. The `.venv` inside a worktree is a relative symlink back to the main `.venv`, so dependencies are shared.
 
+## Parallel-agent workflow
+
+GitHub issues are the unit of work. Each issue carries a `state:*` label that tracks where it sits in the pipeline (planning → ready → in-progress → review → merge), plus `type:*`, `priority:*`, optional `area:*`, and the `touches:bot.py` routing hint. The flow is mediated by two skills: `plan-issue` (turns a raw issue into something an agent can pick up) and `clarify-issue` (worker agent's escape hatch when a body is silent on a load-bearing decision). Run `scripts/setup-labels.sh` once per repo to provision the label set. Full taxonomy and state machine: see `parallel-agentic-plan.md`.
+
 ## Environment variables (`.env`)
 
 | Variable | Required | Default |
