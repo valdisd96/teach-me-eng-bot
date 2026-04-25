@@ -63,7 +63,7 @@ gh issue list \
 
 ### Task 1 — Worktree infrastructure
 **Deliverables**
-- `scripts/wt.sh create <branch>` — `git worktree add ./worktrees/<branch> -b <branch>`, fresh `data/vocab.db`, `./venv` symlink to main `.venv` (fast), copies `.env` from matching slot.
+- `scripts/wt.sh create <branch>` — `git worktree add ./worktrees/<branch> -b <branch>`, fresh `data/vocab.db`, `.venv` symlink to main `.venv` (fast), copies `.env` from matching slot.
 - `scripts/wt.sh destroy <branch>` — prompts if branch has uncommitted/unpushed work; then `git worktree remove` + cleanup.
 - `scripts/wt.sh list` — wraps `git worktree list` with slot info.
 - `.gitignore`: add `worktrees/` and `env/slot*.env`.

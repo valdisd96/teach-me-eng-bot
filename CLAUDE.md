@@ -29,6 +29,18 @@ source .venv/bin/activate && python -m pytest -q    # run tests
 
 The llama.cpp server must already be running on `http://127.0.0.1:8080` before starting the bot.
 
+## Worktree tooling
+
+`scripts/wt.sh` manages git worktrees under `./worktrees/<branch>/` for the parallel-agent workflow (see `parallel-agentic-plan.md`). Each worktree is bound to a numbered slot (1..2) so it can pick up the matching `env/slot<N>.env` for its Telegram bot token.
+
+```bash
+scripts/wt.sh create <branch> [slot]   # cuts -b <branch> from main, links .venv, copies env/slot<N>.env → .env
+scripts/wt.sh destroy <branch>         # prompts on uncommitted changes / unpushed commits
+scripts/wt.sh list                     # git worktree list with the slot column
+```
+
+Slot numbers live in `<git-dir>/wt-slot` (per-worktree git metadata, invisible to `git status`). `env/slot<N>.env` is gitignored; if missing, `create` seeds it from `.env.example` so the worktree always has a `.env` to start from. The `.venv` inside a worktree is a relative symlink back to the main `.venv`, so dependencies are shared.
+
 ## Environment variables (`.env`)
 
 | Variable | Required | Default |

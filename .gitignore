@@ -1,5 +1,5 @@
 .env
-.venv/
+.venv
 __pycache__/
 *.pyc
 *.pyo
@@ -8,3 +8,5 @@ logs/
 data/
 .claude/settings.local.json
 .pytest_cache/
+worktrees/
+env/slot*.env
