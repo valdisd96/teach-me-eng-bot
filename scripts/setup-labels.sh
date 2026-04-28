@@ -3,9 +3,8 @@
 # autonomous pipeline (plan-exec → test-writer → reviewer).
 #
 # Idempotent: `gh label create --force` creates the label if missing and
-# updates colour/description in place if it already exists. Deprecated
-# labels are deleted with `--yes` and `|| true`, so a missing label is
-# not an error. Re-run any time the schema in workflow.md changes.
+# updates colour/description in place if it already exists. Re-run any
+# time the schema in workflow.md changes.
 
 set -euo pipefail
 
@@ -17,11 +16,6 @@ fi
 create() {
     local name="$1" color="$2" desc="$3"
     gh label create "${name}" --color "${color}" --description "${desc}" --force
-}
-
-drop() {
-    local name="$1"
-    gh label delete "${name}" --yes >/dev/null 2>&1 || true
 }
 
 # State (blue) — workflow position; one-of, flips as the issue moves.
@@ -53,11 +47,6 @@ create "area:llm"        "c2c2c2" "llm.py"
 create "area:translator" "c2c2c2" "translator.py"
 create "area:config"     "c2c2c2" "config_flow.py"
 create "area:db"         "c2c2c2" "db.py"
-
-# Deprecated — remove labels from the old parallel/worktree design.
-drop "state:ready-for-parallel-work"
-drop "state:ready-for-review"
-drop "touches:bot.py"
 
 owner_repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 echo "setup-labels: done. View at https://github.com/${owner_repo}/labels"
