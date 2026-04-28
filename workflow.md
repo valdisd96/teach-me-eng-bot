@@ -127,6 +127,8 @@ There is no path-based auto-block list; the reviewer prompt does the judgment.
 
 A long-running daemon. Polls GitHub every 60 seconds, dispatches one agent per tick.
 
+> Detailed design space — every option per axis, recommendations, open questions: **`orchestrator-plan.md`**.
+
 ### Polling logic
 
 ```
