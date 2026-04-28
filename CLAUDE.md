@@ -31,7 +31,7 @@ The llama.cpp server must already be running on `http://127.0.0.1:8080` before s
 
 ## Issue-driven workflow
 
-GitHub issues are the unit of work. Each issue carries a `state:*` label that tracks where it sits in the pipeline (planning → ready → in-progress → review → merge), plus `type:*`, `priority:*`, and an optional `area:*`. Two skills mediate the flow: `plan-issue` (turns a raw issue into something an agent can pick up) and `clarify-issue` (escape hatch when an issue body is silent on a load-bearing decision). Run `scripts/setup-labels.sh` once per repo to provision the label set. Full taxonomy and state machine: see `parallel-agentic-plan.md`.
+GitHub issues are the unit of work. Each issue carries a `state:*` label that tracks where it sits in a three-stage pipeline (plan-exec → test-writer → reviewer), plus `type:*`, `priority:*`, and an optional `area:*`. An orchestrator daemon polls labels and dispatches the right agent. Auto-merge after reviewer approval — the user only intervenes to file issues, answer clarification comments, or un-block parked issues. Run `scripts/setup-labels.sh` once per repo to provision the label set. Full design (state machine, skills, orchestrator, safety checks): see `workflow.md`.
 
 ## Environment variables (`.env`)
 
