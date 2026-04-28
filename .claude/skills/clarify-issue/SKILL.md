@@ -1,6 +1,6 @@
 ---
 name: clarify-issue
-description: Use this skill when, partway through working on a GitHub issue inside a worktree, you hit genuine ambiguity that you cannot resolve from the body, the codebase, or `dev-flow` rules. Posts a focused question as an issue comment, flips the state label to `state:clarification-needed`, and stops work on the issue. Do not invoke for self-resolvable uncertainty.
+description: Use this skill when, partway through working on a GitHub issue, you hit genuine ambiguity that you cannot resolve from the body, the codebase, or `dev-flow` rules. Posts a focused question as an issue comment, flips the state label to `state:clarification-needed`, and stops work on the issue. Do not invoke for self-resolvable uncertainty.
 version: 1.0.0
 ---
 

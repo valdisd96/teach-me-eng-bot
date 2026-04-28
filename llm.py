@@ -2,9 +2,8 @@
 
 Default backend is the local llama.cpp server on port 8080. When
 ``LLM_BACKEND=openrouter`` is set in the environment, the same calls are
-routed to OpenRouter instead — used by parallel-agent worktrees that don't
-have access to the Pi's llama.cpp server. Both backends speak the same
-OpenAI SSE/JSON dialect, so the parsing helpers don't branch.
+routed to OpenRouter instead — useful when developing off-Pi. Both backends
+speak the same OpenAI SSE/JSON dialect, so the parsing helpers don't branch.
 
 Entry points:
   * `stream_chat(messages)` — async generator yielding token deltas for live
