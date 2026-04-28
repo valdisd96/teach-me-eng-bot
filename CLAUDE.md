@@ -29,21 +29,9 @@ source .venv/bin/activate && python -m pytest -q    # run tests
 
 The llama.cpp server must already be running on `http://127.0.0.1:8080` before starting the bot.
 
-## Worktree tooling
+## Issue-driven workflow
 
-`scripts/wt.sh` manages git worktrees under `./worktrees/<branch>/` for the parallel-agent workflow (see `parallel-agentic-plan.md`). Each worktree is bound to a numbered slot (1..2) so it can pick up the matching `env/slot<N>.env` for its Telegram bot token.
-
-```bash
-scripts/wt.sh create <branch> [slot]   # cuts -b <branch> from main, links .venv, copies env/slot<N>.env → .env
-scripts/wt.sh destroy <branch>         # prompts on uncommitted changes / unpushed commits
-scripts/wt.sh list                     # git worktree list with the slot column
-```
-
-Slot numbers live in `<git-dir>/wt-slot` (per-worktree git metadata, invisible to `git status`). `env/slot<N>.env` is gitignored; if missing, `create` seeds it from `.env.example` so the worktree always has a `.env` to start from. The `.venv` inside a worktree is a relative symlink back to the main `.venv`, so dependencies are shared.
-
-## Parallel-agent workflow
-
-GitHub issues are the unit of work. Each issue carries a `state:*` label that tracks where it sits in the pipeline (planning → ready → in-progress → review → merge), plus `type:*`, `priority:*`, optional `area:*`, and the `touches:bot.py` routing hint. The flow is mediated by two skills: `plan-issue` (turns a raw issue into something an agent can pick up) and `clarify-issue` (worker agent's escape hatch when a body is silent on a load-bearing decision). Run `scripts/setup-labels.sh` once per repo to provision the label set. Full taxonomy and state machine: see `parallel-agentic-plan.md`.
+GitHub issues are the unit of work. Each issue carries a `state:*` label that tracks where it sits in the pipeline (planning → ready → in-progress → review → merge), plus `type:*`, `priority:*`, and an optional `area:*`. Two skills mediate the flow: `plan-issue` (turns a raw issue into something an agent can pick up) and `clarify-issue` (escape hatch when an issue body is silent on a load-bearing decision). Run `scripts/setup-labels.sh` once per repo to provision the label set. Full taxonomy and state machine: see `parallel-agentic-plan.md`.
 
 ## Environment variables (`.env`)
 
@@ -52,7 +40,7 @@ GitHub issues are the unit of work. Each issue carries a `state:*` label that tr
 | `TELEGRAM_TOKEN` | Yes | — |
 | `SYSTEM_PROMPT` | No | `"You are a friendly English tutor chatting casually with a learner. Use natural, everyday English. If they ask about grammar, vocabulary, or usage, explain briefly with a small example."` |
 | `ALLOWED_USER_IDS` | No | empty (allow all) — comma/whitespace-separated Telegram user IDs; if set, other users are silently ignored and logged |
-| `LLM_BACKEND` | No | `llama` — local llama.cpp on `http://127.0.0.1:8080`. Set to `openrouter` to route chat completions to OpenRouter instead (used by parallel-agent worktrees that can't reach the Pi). |
+| `LLM_BACKEND` | No | `llama` — local llama.cpp on `http://127.0.0.1:8080`. Set to `openrouter` to route chat completions to OpenRouter instead (useful when developing off-Pi). |
 | `OPENROUTER_API_KEY` | When `LLM_BACKEND=openrouter` | — sent as `Authorization: Bearer <key>`. Empty value with `LLM_BACKEND=openrouter` raises at the first LLM call. |
 | `OPENROUTER_MODEL` | No | `google/gemma-4-26b-a4b-it:free`. Free-tier model, used for smoke testing only — responses will diverge from the Pi's Gemma-4. |
 
