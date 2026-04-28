@@ -2,8 +2,8 @@
 
 We don't shell out to `gh` (that would hit live GitHub). The script is a flat
 list of `create ...` invocations, so the meaningful contract is "every label
-named in parallel-agentic-plan.md appears in the script". A bash syntax check
-catches typos in the dispatcher.
+named in workflow.md appears in the script". A bash syntax check catches
+typos in the dispatcher.
 """
 
 from __future__ import annotations
@@ -20,10 +20,10 @@ SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "setup-labels.sh"
 EXPECTED_LABELS = [
     # state
     "state:needs-planning",
-    "state:ready-for-parallel-work",
     "state:in-progress",
     "state:clarification-needed",
-    "state:ready-for-review",
+    "state:tests-pending",
+    "state:in-review",
     "state:needs-rework",
     "state:blocked",
     # type
@@ -43,8 +43,6 @@ EXPECTED_LABELS = [
     "area:translator",
     "area:config",
     "area:db",
-    # hint
-    "touches:bot.py",
 ]
 
 
@@ -73,7 +71,7 @@ def test_script_uses_force_for_idempotency() -> None:
 def test_each_label_has_a_color_argument(label: str) -> None:
     """Catches a `create "name"` line that forgot its colour/description tail."""
     text = SCRIPT.read_text()
-    pattern = rf'"{re.escape(label)}"\s+"[0-9a-fA-F]{{6}}"\s+"[^"]+"'
+    pattern = rf'create\s+"{re.escape(label)}"\s+"[0-9a-fA-F]{{6}}"\s+"[^"]+"'
     assert re.search(pattern, text), (
-        f"{label} is missing the expected `\"name\" \"hex\" \"desc\"` triple"
+        f"{label} is missing the expected `create \"name\" \"hex\" \"desc\"` triple"
     )
