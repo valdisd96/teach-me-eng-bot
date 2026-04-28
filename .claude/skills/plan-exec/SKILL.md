@@ -1,0 +1,178 @@
+---
+name: plan-exec
+description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
+version: 1.0.0
+---
+
+# plan-exec
+
+Stage 1 of the issue → merged pipeline (see `workflow.md`). One Claude session, plan + implement combined. Expects to be invoked headless via `scripts/agent-plan-exec.sh <issue#>` — no human is in the loop.
+
+## Hard boundaries
+
+You MAY:
+- Read code, edit code, write new files.
+- `git checkout`, `git branch`, `git commit` (locally only).
+- Run `pytest` for smoke checks.
+- Comment on the issue (`gh issue comment`).
+- Flip issue labels (`gh issue edit`).
+
+You MUST NOT:
+- `git push` — that's Stage 2 (test-writer).
+- `gh pr create` / `gh pr edit` — Stage 2.
+- `gh pr merge` — Stage 3 (reviewer).
+- `gh issue close` — happens automatically when the reviewer merges (via `Closes #N` in the PR body).
+
+## The flow
+
+### 1. Read everything
+
+```bash
+gh issue view <N> --json number,title,body,labels,author,comments
+```
+
+If the issue is at `state:needs-rework`, also fetch the PR's review comments — they're the spec for this cycle:
+
+```bash
+PR=$(gh pr list --search "Closes #<N>" --state all --json number -q '.[0].number')
+[[ -n "$PR" ]] && gh pr view "$PR" --json comments,reviews,headRefName
+```
+
+### 2. Verify state and flip to in-progress
+
+The label MUST already be `state:needs-planning` or `state:needs-rework` (the runner script enforces this; double-check). Flip:
+
+```bash
+gh issue edit <N> \
+  --remove-label "state:needs-planning,state:needs-rework" \
+  --add-label "state:in-progress"
+```
+
+`gh` silently ignores `--remove-label` for labels not present.
+
+### 3. Decide: clarify or proceed?
+
+Invoke `clarify-issue` only when:
+- The body is silent on a behaviour choice that **materially changes the diff** (e.g. "should the new field be nullable?").
+- Two reasonable interpretations of the body lead to different module changes.
+- The change is too large for one focused PR (~300 LOC, one area). Ask the user to split.
+- A code constraint collides with what the body asks for (existing schema, FSRS invariant, etc.).
+
+Do NOT clarify for:
+- Naming choices — pick what matches the codebase.
+- Small implementation details — make the most reasonable call.
+- Anything answerable by reading more code or `CLAUDE.md`.
+
+The bar: *would another reasonable agent make a different decision here that would survive into a different PR shape?*
+
+### 4. Branch
+
+**First cycle (`state:needs-planning`):**
+
+```bash
+git checkout main && git pull --ff-only
+git checkout -b <type>/<topic>
+```
+
+`<type>` comes from the `type:*` label (`feat` / `fix` / `chore` / `refactor`). If absent, infer from the change kind and add the label:
+
+```bash
+gh issue edit <N> --add-label "type:fix"
+```
+
+`<topic>` is a kebab-case summary of the issue title, ~3–5 words.
+
+**Rework cycle (`state:needs-rework`):**
+
+```bash
+BRANCH=$(gh pr view "$PR" --json headRefName -q '.headRefName')
+git fetch origin "$BRANCH"
+git checkout "$BRANCH" && git pull --ff-only
+```
+
+### 5. Apply missing labels
+
+The issue should carry `type:*`, `priority:*`, and ideally `area:*`. Add what's missing:
+
+- `priority:medium` is the default if absent.
+- `area:*` matches the modules you'll touch.
+
+```bash
+gh issue edit <N> --add-label "<comma,separated,labels>"
+```
+
+### 6. Implement
+
+Follow the `dev-flow` skill. Specifically:
+- Keep the diff focused on this issue's scope.
+- Match the project's module layout — `bot.py` is wiring; logic lives in `vocab.py`, `llm.py`, `scheduler.py`, etc.
+- Keep helpers pure and injectable. Test seams matter for Stage 2.
+- Update `.env.example` and the env table in `CLAUDE.md` if you add a new variable.
+
+**Do NOT write tests yourself.** Stage 2 (test-writer) writes the tests in a fresh session. You write the implementation only. The exception: if existing tests need updating because behaviour legitimately changed, update them as part of your commit.
+
+### 7. Smoke check
+
+Before committing, prove the code at least compiles and existing tests still pass:
+
+```bash
+python -m py_compile $(git diff --name-only main -- '*.py')
+source .venv/bin/activate && python -m pytest -q
+```
+
+If existing tests now fail, fix the code (not the tests) until the suite is green. New-code-path coverage is Stage 2's job, not yours.
+
+### 8. Commit
+
+One focused commit. Subject ≤ 70 chars, imperative mood. Body explains the why. End the body with `Refs #<N>` (not `Closes #<N>` — Stage 2's PR carries the closer).
+
+```bash
+git add <changed-files>
+git commit -m "$(cat <<'EOF'
+<imperative subject>
+
+<one-paragraph why>
+
+Refs #<N>
+EOF
+)"
+```
+
+Don't `git add -A` or `git add .` — name the files you changed to avoid pulling in stray local artefacts.
+
+### 9. Hand off
+
+```bash
+gh issue edit <N> \
+  --remove-label "state:in-progress" \
+  --add-label "state:tests-pending"
+```
+
+Print one summary line and exit:
+
+```
+done: <branch-name> at <short-sha>, ready for test-writer
+```
+
+## Rework specifics
+
+When invoked at `state:needs-rework`:
+- The PR is already open. The branch is on origin. Make new commits, **don't amend** earlier ones — the test-writer will push them as the PR's next push.
+- Treat the reviewer's comments + the original issue body together as the spec. If they conflict, that's a `clarify-issue` case — the user resolves.
+- Don't open a new PR. The existing one picks up your commits when Stage 2 pushes.
+
+## Escalating to state:blocked
+
+You generally don't set `state:blocked` — that's reserved for the orchestrator (cycle limit) and the reviewer (safety triggers). The exception: the issue requests something genuinely impossible (referenced model/file/API doesn't exist).
+
+```bash
+gh issue comment <N> --body "Cannot proceed: <reason>"
+gh issue edit <N> --remove-label "state:in-progress" --add-label "state:blocked"
+```
+
+## What "done" looks like
+
+- A branch with one new commit on it.
+- Smoke tests pass on that commit.
+- Issue is at `state:tests-pending`.
+- No `git push`. No PR. No merge.
