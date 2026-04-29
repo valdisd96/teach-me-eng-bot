@@ -147,15 +147,15 @@ def scan_mentions(text: str, words: list[tuple[int, str]]) -> list[int]:
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
 
 
-def bold_matches(text: str, words: list[str]) -> str:
-    """HTML-escape `text` and wrap any vocab-word substrings in <b>…</b>.
+def highlight_matches(text: str, words: list[str]) -> str:
+    """HTML-escape `text` and wrap any vocab-word substrings in <code>…</code>.
 
     Mirrors `scan_mentions`'s case-insensitive substring match. When two
     candidate words would overlap (e.g. "cat" inside "concatenate") the
-    longer one wins, so we never bold a fragment of a longer match. Markdown
-    bold markers (`**x**` / `__x__`) the model sometimes emits are stripped
-    first — Telegram's HTML mode would otherwise render them literally.
-    Returns a string safe to send with Telegram's HTML parse mode.
+    longer one wins, so we never highlight a fragment of a longer match.
+    Markdown bold markers (`**x**` / `__x__`) the model sometimes emits are
+    stripped first — Telegram's HTML mode would otherwise render them
+    literally. Returns a string safe to send with Telegram's HTML parse mode.
     """
     if not text:
         return ""
@@ -178,9 +178,9 @@ def bold_matches(text: str, words: list[str]) -> str:
     cursor = 0
     for s, e in spans:
         out.append(html.escape(text[cursor:s]))
-        out.append("<b>")
+        out.append("<code>")
         out.append(html.escape(text[s:e]))
-        out.append("</b>")
+        out.append("</code>")
         cursor = e
     out.append(html.escape(text[cursor:]))
     return "".join(out)

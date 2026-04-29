@@ -121,63 +121,66 @@ def test_scan_mentions_empty_inputs() -> None:
     assert vocab.scan_mentions("", [(1, "hello")]) == []
 
 
-def test_bold_matches_empty_text() -> None:
-    assert vocab.bold_matches("", ["foo"]) == ""
+def test_highlight_matches_empty_text() -> None:
+    assert vocab.highlight_matches("", ["foo"]) == ""
 
 
-def test_bold_matches_no_words_just_escapes() -> None:
-    assert vocab.bold_matches("a < b & c", []) == "a &lt; b &amp; c"
+def test_highlight_matches_no_words_just_escapes() -> None:
+    assert vocab.highlight_matches("a < b & c", []) == "a &lt; b &amp; c"
 
 
-def test_bold_matches_wraps_substring_case_insensitive() -> None:
-    out = vocab.bold_matches("It was Serendipity, brief.", ["serendipity"])
-    assert out == "It was <b>Serendipity</b>, brief."
+def test_highlight_matches_wraps_substring_case_insensitive() -> None:
+    out = vocab.highlight_matches("It was Serendipity, brief.", ["serendipity"])
+    assert out == "It was <code>Serendipity</code>, brief."
 
 
-def test_bold_matches_escapes_html_chars_outside_match() -> None:
-    out = vocab.bold_matches("<cat> & dog", ["cat"])
-    assert out == "&lt;<b>cat</b>&gt; &amp; dog"
+def test_highlight_matches_escapes_html_chars_outside_match() -> None:
+    out = vocab.highlight_matches("<cat> & dog", ["cat"])
+    assert out == "&lt;<code>cat</code>&gt; &amp; dog"
 
 
-def test_bold_matches_longer_word_wins_on_overlap() -> None:
-    out = vocab.bold_matches("concatenate things", ["cat", "concatenate"])
-    assert out == "<b>concatenate</b> things"
+def test_highlight_matches_longer_word_wins_on_overlap() -> None:
+    out = vocab.highlight_matches("concatenate things", ["cat", "concatenate"])
+    assert out == "<code>concatenate</code> things"
 
 
-def test_bold_matches_multiple_non_overlapping() -> None:
-    out = vocab.bold_matches("cat dog cat", ["cat", "dog"])
-    assert out == "<b>cat</b> <b>dog</b> <b>cat</b>"
+def test_highlight_matches_multiple_non_overlapping() -> None:
+    out = vocab.highlight_matches("cat dog cat", ["cat", "dog"])
+    assert out == "<code>cat</code> <code>dog</code> <code>cat</code>"
 
 
-def test_bold_matches_phrase() -> None:
-    out = vocab.bold_matches("She did it on the fly today.", ["on the fly"])
-    assert out == "She did it <b>on the fly</b> today."
+def test_highlight_matches_phrase() -> None:
+    out = vocab.highlight_matches("She did it on the fly today.", ["on the fly"])
+    assert out == "She did it <code>on the fly</code> today."
 
 
-def test_bold_matches_ignores_empty_word_entries() -> None:
-    assert vocab.bold_matches("hello world", ["", "world"]) == "hello <b>world</b>"
+def test_highlight_matches_ignores_empty_word_entries() -> None:
+    assert (
+        vocab.highlight_matches("hello world", ["", "world"])
+        == "hello <code>world</code>"
+    )
 
 
-def test_bold_matches_strips_markdown_bold_around_vocab_word() -> None:
-    out = vocab.bold_matches(
+def test_highlight_matches_strips_markdown_bold_around_vocab_word() -> None:
+    out = vocab.highlight_matches(
         "It's a testament to **strength** today.", ["strength"]
     )
-    assert out == "It&#x27;s a testament to <b>strength</b> today."
+    assert out == "It&#x27;s a testament to <code>strength</code> today."
 
 
-def test_bold_matches_strips_markdown_bold_when_word_not_in_vocab() -> None:
-    out = vocab.bold_matches("truly **remarkable** indeed", [])
+def test_highlight_matches_strips_markdown_bold_when_word_not_in_vocab() -> None:
+    out = vocab.highlight_matches("truly **remarkable** indeed", [])
     assert out == "truly remarkable indeed"
 
 
-def test_bold_matches_strips_underscore_markdown_bold() -> None:
-    out = vocab.bold_matches("__placid__ waters", ["placid"])
-    assert out == "<b>placid</b> waters"
+def test_highlight_matches_strips_underscore_markdown_bold() -> None:
+    out = vocab.highlight_matches("__placid__ waters", ["placid"])
+    assert out == "<code>placid</code> waters"
 
 
-def test_bold_matches_handles_multiple_markdown_chunks() -> None:
-    out = vocab.bold_matches("**alpha** then **beta** end", ["beta"])
-    assert out == "alpha then <b>beta</b> end"
+def test_highlight_matches_handles_multiple_markdown_chunks() -> None:
+    out = vocab.highlight_matches("**alpha** then **beta** end", ["beta"])
+    assert out == "alpha then <code>beta</code> end"
 
 
 def test_bump_mentions_increments_and_timestamps(conn: sqlite3.Connection) -> None:
