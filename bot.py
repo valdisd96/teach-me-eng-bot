@@ -222,7 +222,7 @@ async def dispatch_push(chat_id: int) -> None:
         ]]
     )
     chat_words = [r["text"] for r in vocab.list_words(conn, chat_id)]
-    formatted = vocab.bold_matches(text, chat_words)
+    formatted = vocab.highlight_matches(text, chat_words)
     try:
         msg = await app.bot.send_message(
             chat_id=chat_id, text=formatted, reply_markup=kb, parse_mode="HTML"
@@ -521,12 +521,12 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not explanation:
         return
     chat_id = update.effective_chat.id
-    # Reuse the rated word's text for the transcript tag and to bold it inline.
+    # Reuse the rated word's text for the transcript tag and to highlight it inline.
     row = conn.execute(
         "SELECT text FROM words WHERE id = ?", (word_id,)
     ).fetchone()
     tag_word = row["text"] if row is not None else "?"
-    formatted = vocab.bold_matches(
+    formatted = vocab.highlight_matches(
         explanation, [tag_word] if row is not None else []
     )
 
@@ -661,7 +661,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     last_edit = asyncio.get_event_loop().time()
 
     def fmt(s: str) -> str:
-        return vocab.bold_matches(s, word_texts)
+        return vocab.highlight_matches(s, word_texts)
 
     try:
         async for token in llm.stream_chat(histories[chat_id]):

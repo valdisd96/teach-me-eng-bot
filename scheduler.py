@@ -185,7 +185,7 @@ def format_explanation_reply(
 ) -> str:
     """Compose the ❌-forgot reply body — explanation, then optional translation.
 
-    `explanation_html` is already HTML-safe (typically from `vocab.bold_matches`).
+    `explanation_html` is already HTML-safe (typically from `vocab.highlight_matches`).
     `translation` is plain text and gets HTML-escaped here. When translation is
     None or empty the reply is just the explanation, unchanged.
     """
