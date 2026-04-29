@@ -68,6 +68,14 @@ A single-issue serial pipeline where three Claude agents — plan-exec, test-wri
 
 Three human gates only: **filing the issue**, **answering clarifications**, **un-blocking parked issues**.
 
+### Plan comments (`<!-- agent-plan v1 -->`)
+
+Before implementing, plan-exec posts a single issue comment whose body starts with the marker line `<!-- agent-plan v1 -->`. The comment captures *what plan-exec intended to do this cycle* — goal, approach, files to touch, anything explicitly out of scope. Each cycle posts a fresh comment (rework cycles do not edit older ones), so the issue accumulates a chronological history of intent.
+
+Stage 2 (test-writer) reads the latest such comment for context — to understand what behaviours are being introduced and why this shape — but still treats the diff as the source of truth for what to test.
+
+Stage 3 (reviewer) **deliberately filters these comments out**. Reviewing against the implementer's stated intent biases the verdict toward "did the agent do what it said it would" instead of "does the diff actually solve the issue." The reviewer judges only against the issue body, the human Q&A comments, and the diff itself.
+
 ## State labels
 
 The full label set lives in `scripts/setup-labels.sh` (idempotent — safe to re-run).

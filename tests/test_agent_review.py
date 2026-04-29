@@ -94,3 +94,17 @@ def test_script_passes_pr_number_to_agent() -> None:
     """The agent prompt must reference both the issue and PR numbers."""
     text = SCRIPT.read_text()
     assert "PR is #" in text or "PR #${pr_number}" in text or "PR is #${pr_number}" in text
+
+
+def test_script_emits_stream_json_audit_log() -> None:
+    """Stage 3 runs must produce a JSONL audit trail of every tool call,
+    not just the final assistant message."""
+    text = SCRIPT.read_text()
+    assert "--output-format stream-json --verbose" in text
+    assert 'tee "$log"' in text
+
+
+def test_script_extracts_final_result_for_terminal() -> None:
+    """jq extracts the type==result event so the human still sees the summary."""
+    text = SCRIPT.read_text()
+    assert 'select(.type=="result")' in text

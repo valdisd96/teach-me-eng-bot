@@ -90,3 +90,20 @@ def test_script_accepts_unlabelled_fresh_issues() -> None:
     text = SCRIPT.read_text()
     # The case statement must include "" as a valid starting state.
     assert '""|state:needs-planning|state:needs-rework' in text
+
+
+def test_script_emits_stream_json_audit_log() -> None:
+    """Stage 1 runs must produce a JSONL audit trail of every tool call,
+    not just the final assistant message — that is the whole point of
+    logs/agents/. The dispatch must pass --output-format stream-json --verbose
+    and tee the raw stream to the log file."""
+    text = SCRIPT.read_text()
+    assert "--output-format stream-json --verbose" in text
+    assert 'tee "$log"' in text
+
+
+def test_script_extracts_final_result_for_terminal() -> None:
+    """JSONL is for the log; the human watching the terminal still wants the
+    final summary line. jq extracts the type==result event."""
+    text = SCRIPT.read_text()
+    assert 'select(.type=="result")' in text

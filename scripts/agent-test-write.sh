@@ -66,15 +66,22 @@ prompt="Run the test-writer skill for issue #${ISSUE}. The implementation branch
 echo "[test-write] dispatching for issue #${ISSUE}"
 echo "[test-write] log: ${log}"
 
+# --output-format stream-json --verbose: emit a JSONL audit trail of every
+# tool call, message, and result event. Raw JSONL goes to "$log"; the final
+# assistant message is extracted via jq for the human watching the terminal.
+# Pretty-print a saved log with: jq . "$log"
 # --no-session-persistence: every Stage 2 run is a fresh, blind-of-Stage-1 session.
 # --permission-mode bypassPermissions: required for headless — no human to approve prompts.
 # IS_SANDBOX=1: claude refuses --dangerously-skip-permissions / bypassPermissions
 # under root by default; the env var opts in for sandboxed VPS / container hosts.
 IS_SANDBOX=1 claude -p \
+    --output-format stream-json --verbose \
     --model claude-opus-4-7 \
     --no-session-persistence \
     --permission-mode bypassPermissions \
-    "$prompt" 2>&1 | tee "$log"
+    "$prompt" 2>&1 \
+    | tee "$log" \
+    | jq -rR 'fromjson? | select(.type=="result") | .result // empty'
 
 # --- post-run summary ---------------------------------------------------
 

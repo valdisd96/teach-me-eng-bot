@@ -1,7 +1,7 @@
 ---
 name: plan-exec
-description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh) or at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
-version: 1.0.0
+description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh) or at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, post a `<!-- agent-plan v1 -->` comment summarizing intent, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
+version: 1.1.0
 ---
 
 # plan-exec
@@ -106,7 +106,33 @@ The issue should carry `type:*`, `priority:*`, and ideally `area:*`. Add what's 
 gh issue edit <N> --add-label "<comma,separated,labels>"
 ```
 
-### 6. Implement
+### 6. Post the plan
+
+Before writing any code, post a single issue comment that captures *what you are about to do*. This is the only artefact of plan-exec's intent that survives — Stage 2 reads it for context, Stage 3 deliberately ignores it (the reviewer judges against the issue body and the diff, not your stated intent).
+
+The comment **must** start with the marker line `<!-- agent-plan v1 -->`. The marker is what test-writer searches for and what review-pr filters out.
+
+```bash
+gh issue comment <N> --body "$(cat <<'EOF'
+<!-- agent-plan v1 -->
+## Plan
+
+**Goal:** <one-sentence restatement of what the issue asks>
+
+**Approach:** <one paragraph: where the change lives, why this shape over alternatives>
+
+**Files to change:**
+- `<path>` — <what changes there>
+- ...
+
+**Out of scope:** <anything explicit you are NOT doing this cycle, if relevant>
+EOF
+)"
+```
+
+Keep it short — under ~25 lines. A plan that reads like a transcript is useless. On rework cycles post a *new* comment (do not edit prior ones); test-writer reads the latest, and the older plans stay as history.
+
+### 7. Implement
 
 Follow the `dev-flow` skill. Specifically:
 - Keep the diff focused on this issue's scope.
@@ -116,7 +142,7 @@ Follow the `dev-flow` skill. Specifically:
 
 **Do NOT write tests yourself.** Stage 2 (test-writer) writes the tests in a fresh session. You write the implementation only. The exception: if existing tests need updating because behaviour legitimately changed, update them as part of your commit.
 
-### 7. Smoke check
+### 8. Smoke check
 
 Before committing, prove the code at least compiles and existing tests still pass:
 
@@ -127,7 +153,7 @@ source .venv/bin/activate && python -m pytest -q
 
 If existing tests now fail, fix the code (not the tests) until the suite is green. New-code-path coverage is Stage 2's job, not yours.
 
-### 8. Commit
+### 9. Commit
 
 One focused commit. Subject ≤ 70 chars, imperative mood. Body explains the why. End the body with `Refs #<N>` (not `Closes #<N>` — Stage 2's PR carries the closer).
 
@@ -145,7 +171,7 @@ EOF
 
 Don't `git add -A` or `git add .` — name the files you changed to avoid pulling in stray local artefacts.
 
-### 9. Hand off
+### 10. Hand off
 
 ```bash
 gh issue edit <N> \
