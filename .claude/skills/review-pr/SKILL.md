@@ -1,7 +1,7 @@
 ---
 name: review-pr
-description: Stage 3 of the autonomous pipeline. FRESH session. Invoked headlessly by scripts/agent-review.sh against an issue at state:in-review. Reads the issue body + Q&A comments + full PR diff (incl tests). Re-runs pytest as the merge gate. Outcomes are exactly one of three branches — APPROVE (gh pr merge --squash --delete-branch; the issue auto-closes via Closes #N), REJECT (gh pr review --request-changes with specific comments + flip issue to state:needs-rework), or BLOCK (flip to state:blocked + comment why; never merge). Block triggers are explicit in the safety checklist — secrets, CI tampering, schema risk, suspicious deps, service files, scope drift big enough to look like a different change.
-version: 1.0.0
+description: Stage 3 of the autonomous pipeline. FRESH session. Invoked headlessly by scripts/agent-review.sh against an issue at state:in-review. Reads the issue body + human Q&A comments + full PR diff (incl tests). Deliberately ignores `<!-- agent-plan v1 -->` comments — those are plan-exec's stated intent, and reviewing against intent biases the verdict toward "did the agent do what it said" instead of "does the diff solve the issue." Re-runs pytest as the merge gate. Outcomes are exactly one of three branches — APPROVE (gh pr merge --squash --delete-branch; the issue auto-closes via Closes #N), REJECT (gh pr review --request-changes with specific comments + flip issue to state:needs-rework), or BLOCK (flip to state:blocked + comment why; never merge). Block triggers are explicit in the safety checklist — secrets, CI tampering, schema risk, suspicious deps, service files, scope drift big enough to look like a different change.
+version: 1.1.0
 ---
 
 # review-pr
@@ -41,13 +41,16 @@ If multiple open PRs reference the issue, that's a bug — comment on the issue,
 
 ### 2. Read everything
 
+Read the issue body + human Q&A comments + PR title/body + full diff. **Filter out any comment whose body starts with `<!-- agent-plan`** — those are plan-exec's stated intent, not human Q&A. Reading them biases the review toward "did the agent do what it said it would" instead of "does the diff actually solve the issue."
+
 ```bash
-gh issue view <N> --json title,body,comments
+gh issue view <N> --json title,body,comments \
+  --jq '{title, body, comments: [.comments[] | select((.body | startswith("<!-- agent-plan")) | not)]}'
 gh pr view "$PR" --json title,body,headRefName,baseRefName,additions,deletions,changedFiles
 gh pr diff "$PR"
 ```
 
-Capture: the issue's intent (body + clarification Q&A), what the PR claims to do (title + body), and the full diff.
+Capture: the issue's intent (body + clarification Q&A only), what the PR claims to do (title + body), and the full diff.
 
 ### 3. Switch to the PR branch and re-run pytest
 
@@ -164,3 +167,4 @@ If two outcomes seem to apply (e.g. red pytest **and** secret in diff), choose *
 - Re-run pytest more than once trying to get green. Flake-hunting belongs to plan-exec / test-writer, not Stage 3.
 - Leave the issue at `state:in-review` after deciding. Always flip exactly once.
 - Merge with a different strategy (`--merge` / `--rebase`). The pipeline assumes squash so each issue maps to one main commit.
+- **Read `<!-- agent-plan` comments.** Those are plan-exec's stated intent. Reviewing against intent rather than the diff biases the verdict — the reviewer's job is to judge what the code does against what the issue asked for, not to grade the implementer's plan adherence. Filter them out at the `gh issue view` step (see step 2).

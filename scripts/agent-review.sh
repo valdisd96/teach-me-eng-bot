@@ -75,15 +75,22 @@ prompt="Run the review-pr skill for issue #${ISSUE}. The PR is #${pr_number}. De
 echo "[review] dispatching for issue #${ISSUE} (PR #${pr_number})"
 echo "[review] log: ${log}"
 
+# --output-format stream-json --verbose: emit a JSONL audit trail of every
+# tool call, message, and result event. Raw JSONL goes to "$log"; the final
+# assistant message is extracted via jq for the human watching the terminal.
+# Pretty-print a saved log with: jq . "$log"
 # --no-session-persistence: every Stage 3 run is a fresh, isolated session.
 # --permission-mode bypassPermissions: required for headless — no human to approve prompts.
 # IS_SANDBOX=1: claude refuses --dangerously-skip-permissions / bypassPermissions
 # under root by default; the env var opts in for sandboxed VPS / container hosts.
 IS_SANDBOX=1 claude -p \
+    --output-format stream-json --verbose \
     --model claude-opus-4-7 \
     --no-session-persistence \
     --permission-mode bypassPermissions \
-    "$prompt" 2>&1 | tee "$log"
+    "$prompt" 2>&1 \
+    | tee "$log" \
+    | jq -rR 'fromjson? | select(.type=="result") | .result // empty'
 
 # --- post-run summary ---------------------------------------------------
 

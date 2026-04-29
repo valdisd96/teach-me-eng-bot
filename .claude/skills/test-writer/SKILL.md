@@ -1,12 +1,12 @@
 ---
 name: test-writer
-description: Stage 2 of the autonomous pipeline. FRESH session — no plan-exec rationale. Invoked headlessly by scripts/agent-test-write.sh on a state:tests-pending issue. Locates the implementation branch left by plan-exec, reads the branch diff (excluding existing test changes), writes new tests for the new code paths matching project style, runs pytest. On green commits the tests, pushes, opens or updates the PR with `Closes #<N>`, flips state:tests-pending → state:in-review. On red after self-checking that the test reflects the diff's actual behaviour, comments on the issue with the failure, flips state:tests-pending → state:needs-rework, and leaves the broken state local-only. Never modifies code outside tests/.
-version: 1.0.0
+description: Stage 2 of the autonomous pipeline. FRESH session — no plan-exec rationale beyond the issue's `<!-- agent-plan v1 -->` comment. Invoked headlessly by scripts/agent-test-write.sh on a state:tests-pending issue. Locates the implementation branch left by plan-exec, reads the latest agent-plan comment for intent, reads the branch diff (excluding existing test changes), writes new tests for the new code paths matching project style, runs pytest. On green commits the tests, pushes, opens or updates the PR with `Closes #<N>`, flips state:tests-pending → state:in-review. On red after self-checking that the test reflects the diff's actual behaviour, comments on the issue with the failure, flips state:tests-pending → state:needs-rework, and leaves the broken state local-only. Never modifies code outside tests/.
+version: 1.1.0
 ---
 
 # test-writer
 
-Stage 2 of the issue → merged pipeline (`workflow.md`). FRESH session — you do not see plan-exec's reasoning, only the code it produced. The point: test what the code does, not what the issue asked for.
+Stage 2 of the issue → merged pipeline (`workflow.md`). FRESH session — you do not see plan-exec's reasoning live, only the code it produced and a brief `<!-- agent-plan v1 -->` comment it left on the issue. The point: test what the code does, not what the issue asked for. The plan comment is context for *why*; the diff is still the source of truth for *what*.
 
 ## Hard boundaries
 
@@ -54,7 +54,18 @@ git fetch origin "$BRANCH" 2>/dev/null || true
 git checkout "$BRANCH"
 ```
 
-### 2. Read the diff
+### 2. Read plan-exec's intent
+
+plan-exec leaves a plan comment on the issue tagged `<!-- agent-plan v1 -->`. Fetch the **latest** one (rework cycles append a fresh plan each pass) and read it for context — to understand which behaviours are being introduced and why this shape was chosen. The diff is still the source of truth for what to test; the plan tells you the goal.
+
+```bash
+gh issue view <N> --json comments -q \
+  '[.comments[] | select(.body | startswith("<!-- agent-plan"))] | last | .body // ""'
+```
+
+If no plan comment exists (older issues, or a plan-exec run that pre-dates this convention), proceed without it — the diff alone is enough. Do not bounce-back over a missing plan comment.
+
+### 3. Read the diff
 
 ```bash
 git diff main...HEAD -- ':!tests/'
@@ -62,9 +73,9 @@ git diff main...HEAD -- ':!tests/'
 
 Excluding `tests/` is deliberate. You write the tests; you do not let plan-exec's test edits anchor your judgment.
 
-### 3. Decide: do new code paths exist?
+### 4. Decide: do new code paths exist?
 
-If the diff is purely cosmetic (docstring, comment, whitespace), no new tests are needed — skip to step 6 and open the PR with no test commit.
+If the diff is purely cosmetic (docstring, comment, whitespace), no new tests are needed — skip to step 7 and open the PR with no test commit.
 
 If the diff adds new functions, branches, error paths, or behaviour, you owe tests for them. Match the existing test style — open `tests/` and read a few files first:
 
@@ -74,7 +85,7 @@ If the diff adds new functions, branches, error paths, or behaviour, you owe tes
 - One concept per test function. Test names describe the behaviour, not the function name.
 - `from __future__ import annotations` at the top of each test module.
 
-### 4. Write the tests
+### 5. Write the tests
 
 Edit / create files in `tests/` only. Cover, in this order of priority:
 
@@ -84,13 +95,13 @@ Edit / create files in `tests/` only. Cover, in this order of priority:
 
 Don't over-write. A small focused test that would fail without the change is better than a sprawling one that exercises the whole module.
 
-### 5. Run pytest
+### 6. Run pytest
 
 ```bash
 source .venv/bin/activate && python -m pytest -q
 ```
 
-#### Green → step 6.
+#### Green → step 7.
 
 #### Red → self-check, then either fix-test or bounce-back.
 
@@ -123,7 +134,7 @@ Then **stop**. Do not push, do not commit failing tests. Your draft tests stay l
 
 The bar for bouncing back: *would another reasonable agent reading only the diff write the same test and see it fail?*
 
-### 6. Commit, push, open or update the PR
+### 7. Commit, push, open or update the PR
 
 If you wrote new tests:
 
@@ -164,7 +175,7 @@ EOF
 
 If the diff was purely cosmetic and you wrote no new tests, still push and open/update the PR. Note it in the test plan: `- [n/a] No code paths changed; existing suite still green`.
 
-### 7. Flip the label
+### 8. Flip the label
 
 ```bash
 gh issue edit <N> \
@@ -172,7 +183,7 @@ gh issue edit <N> \
   --add-label "state:in-review"
 ```
 
-### 8. Exit
+### 9. Exit
 
 Print one line: `done: pushed <BRANCH> at <short-sha>, PR #<P> ready for review`.
 
