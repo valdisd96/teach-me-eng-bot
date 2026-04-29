@@ -68,7 +68,9 @@ echo "[test-write] log: ${log}"
 
 # --no-session-persistence: every Stage 2 run is a fresh, blind-of-Stage-1 session.
 # --permission-mode bypassPermissions: required for headless — no human to approve prompts.
-claude -p \
+# IS_SANDBOX=1: claude refuses --dangerously-skip-permissions / bypassPermissions
+# under root by default; the env var opts in for sandboxed VPS / container hosts.
+IS_SANDBOX=1 claude -p \
     --model claude-opus-4-7 \
     --no-session-persistence \
     --permission-mode bypassPermissions \

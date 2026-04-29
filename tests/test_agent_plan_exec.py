@@ -70,6 +70,13 @@ def test_script_bypasses_permission_prompts() -> None:
     assert "--permission-mode bypassPermissions" in text
 
 
+def test_script_opts_into_sandbox_for_root() -> None:
+    """claude refuses bypassPermissions under root unless IS_SANDBOX=1
+    is set in the environment of the claude invocation."""
+    text = SCRIPT.read_text()
+    assert "IS_SANDBOX=1 claude -p" in text
+
+
 def test_script_writes_log_under_logs_agents() -> None:
     """Log location convention used by the orchestrator."""
     text = SCRIPT.read_text()
