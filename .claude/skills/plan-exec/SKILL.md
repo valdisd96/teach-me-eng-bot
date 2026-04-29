@@ -1,6 +1,6 @@
 ---
 name: plan-exec
-description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
+description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh) or at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
 version: 1.0.0
 ---
 
@@ -40,7 +40,12 @@ PR=$(gh pr list --search "Closes #<N>" --state all --json number -q '.[0].number
 
 ### 2. Verify state and flip to in-progress
 
-The label MUST already be `state:needs-planning` or `state:needs-rework` (the runner script enforces this; double-check). Flip:
+The valid starting states are:
+- **unlabelled** — fresh issue, never picked up. Treat exactly like `state:needs-planning`. The runner script accepts this as the equivalent of "fresh".
+- `state:needs-planning` — explicitly labelled fresh.
+- `state:needs-rework` — coming back from a Stage-2 bounce or Stage-3 rejection.
+
+The runner script enforces these are the only inputs; double-check anyway. Flip to in-progress:
 
 ```bash
 gh issue edit <N> \
@@ -48,7 +53,7 @@ gh issue edit <N> \
   --add-label "state:in-progress"
 ```
 
-`gh` silently ignores `--remove-label` for labels not present.
+`gh` silently ignores `--remove-label` for labels not present, so the same command works whether the issue was unlabelled, `state:needs-planning`, or `state:needs-rework`.
 
 ### 3. Decide: clarify or proceed?
 

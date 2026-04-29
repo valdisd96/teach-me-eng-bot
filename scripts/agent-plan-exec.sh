@@ -47,14 +47,12 @@ fi
 
 state_label=$(echo "$issue_json" | jq -r '[.labels[].name] | map(select(startswith("state:"))) | .[0] // ""')
 case "$state_label" in
-    state:needs-planning|state:needs-rework)
-        ;;
-    "")
-        echo "agent-plan-exec: issue #$ISSUE has no state:* label" >&2
-        exit 2
+    ""|state:needs-planning|state:needs-rework)
+        # Empty state label is a fresh issue — plan-exec applies state:needs-planning
+        # itself as part of the initial flip. No auto-labelling exists at file-time.
         ;;
     *)
-        echo "agent-plan-exec: issue #$ISSUE is at '$state_label', expected state:needs-planning or state:needs-rework" >&2
+        echo "agent-plan-exec: issue #$ISSUE is at '$state_label', expected unset, state:needs-planning, or state:needs-rework" >&2
         exit 2
         ;;
 esac
@@ -69,9 +67,9 @@ log="${log_dir}/plan-exec-${ISSUE}-${ts}.log"
 
 # --- dispatch -----------------------------------------------------------
 
-prompt="Run the plan-exec skill for issue #${ISSUE}. Current state label: ${state_label}."
+prompt="Run the plan-exec skill for issue #${ISSUE}. Current state: ${state_label:-unlabelled (fresh issue — apply state:needs-planning before flipping to in-progress)}."
 
-echo "[plan-exec] dispatching for issue #${ISSUE} (state=${state_label})"
+echo "[plan-exec] dispatching for issue #${ISSUE} (state=${state_label:-unlabelled})"
 echo "[plan-exec] log: ${log}"
 
 # --no-session-persistence: each run is a fresh, unrecoverable session.

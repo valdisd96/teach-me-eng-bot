@@ -76,13 +76,15 @@ The full label set lives in `scripts/setup-labels.sh` (idempotent — safe to re
 
 | Label | Set by | Means |
 |---|---|---|
-| `state:needs-planning` | user (default on new issue) | Untouched. Stage 1 will pick this up. |
+| `state:needs-planning` | user (or implicit — fresh unlabelled issues are treated as if they had this) | Untouched. Stage 1 will pick this up. |
 | `state:in-progress` | Stage 1 (plan-exec, at start) | Plan-exec is working. |
 | `state:clarification-needed` | Stage 1 (clarify-issue) | **HUMAN GATE.** Question posted, waiting on user. Orchestrator skips. |
 | `state:tests-pending` | Stage 1 (at end, after commit) | Branch + commit ready, awaiting test-writer. |
 | `state:in-review` | Stage 2 (after tests green + PR opened) | Reviewer's turn. |
 | `state:needs-rework` | Stage 2 (test failure) or Stage 3 (review failure) | Back to Stage 1. |
 | `state:blocked` | Stage 3 or anyone manually | Stop. **HUMAN GATE.** Park reason in comment. |
+
+**Fresh issues are unlabelled.** New issues filed without any `state:*` label are treated as equivalent to `state:needs-planning` — Stage 1 (plan-exec) accepts them and applies the label as part of its initial flip to `state:in-progress`. The user does not need to manually label new issues.
 
 ### Type, priority, area (unchanged)
 
