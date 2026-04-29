@@ -75,3 +75,11 @@ def test_script_writes_log_under_logs_agents() -> None:
     text = SCRIPT.read_text()
     assert "logs/agents" in text
     assert "plan-exec-" in text
+
+
+def test_script_accepts_unlabelled_fresh_issues() -> None:
+    """Fresh issues (no state:* label) are valid Stage 1 input — the agent
+    applies state:needs-planning itself as part of the initial flip."""
+    text = SCRIPT.read_text()
+    # The case statement must include "" as a valid starting state.
+    assert '""|state:needs-planning|state:needs-rework' in text
