@@ -74,7 +74,9 @@ echo "[plan-exec] log: ${log}"
 
 # --no-session-persistence: each run is a fresh, unrecoverable session.
 # --permission-mode bypassPermissions: required for headless — no human to approve prompts.
-claude -p \
+# IS_SANDBOX=1: claude refuses --dangerously-skip-permissions / bypassPermissions
+# under root by default; the env var opts in for sandboxed VPS / container hosts.
+IS_SANDBOX=1 claude -p \
     --model claude-opus-4-7 \
     --no-session-persistence \
     --permission-mode bypassPermissions \
