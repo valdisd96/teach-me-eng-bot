@@ -3,7 +3,7 @@
 #
 # Spawns a headless Claude session with the plan-exec skill loaded against
 # a specific GitHub issue. Validates the issue exists and is in an expected
-# state, then dispatches. Logs to logs/agents/plan-exec-<N>-<ts>.log.
+# state, then dispatches. Logs to logs/agents/<N>/plan-exec-<ts>.log.
 #
 # Usage: scripts/agent-plan-exec.sh <issue-number>
 #
@@ -60,10 +60,10 @@ esac
 # --- log paths ----------------------------------------------------------
 
 repo_root="$(git rev-parse --show-toplevel)"
-log_dir="${repo_root}/logs/agents"
+log_dir="${repo_root}/logs/agents/${ISSUE}"
 mkdir -p "$log_dir"
 ts=$(date +%Y%m%d-%H%M%S)
-log="${log_dir}/plan-exec-${ISSUE}-${ts}.log"
+log="${log_dir}/plan-exec-${ts}.log"
 
 # --- dispatch -----------------------------------------------------------
 

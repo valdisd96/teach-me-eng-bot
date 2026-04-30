@@ -192,7 +192,7 @@ Each agent script:
 1. Validates the issue/PR is in the expected state.
 2. Builds a prompt from the issue body + comments (or PR diff).
 3. Spawns `claude -p --model claude-opus-4-7 "<prompt>"` with the relevant skill name in the prompt.
-4. Logs stdout/stderr to `logs/agents/<stage>-<issue#>-<timestamp>.log`.
+4. Logs stdout/stderr to `logs/agents/<issue#>/<stage>-<timestamp>.log`.
 5. Exits non-zero if the agent didn't flip the label as expected — the orchestrator logs and moves on.
 
 ## Deployment (VPS)

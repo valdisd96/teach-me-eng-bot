@@ -3,7 +3,7 @@
 #
 # Spawns a headless Claude session with the test-writer skill loaded
 # against an issue at state:tests-pending. Validates state, dispatches,
-# logs to logs/agents/test-write-<N>-<ts>.log.
+# logs to logs/agents/<N>/test-write-<ts>.log.
 #
 # Usage: scripts/agent-test-write.sh <issue-number>
 #
@@ -54,10 +54,10 @@ fi
 # --- log paths ----------------------------------------------------------
 
 repo_root="$(git rev-parse --show-toplevel)"
-log_dir="${repo_root}/logs/agents"
+log_dir="${repo_root}/logs/agents/${ISSUE}"
 mkdir -p "$log_dir"
 ts=$(date +%Y%m%d-%H%M%S)
-log="${log_dir}/test-write-${ISSUE}-${ts}.log"
+log="${log_dir}/test-write-${ts}.log"
 
 # --- dispatch -----------------------------------------------------------
 
