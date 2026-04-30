@@ -15,8 +15,10 @@ so no single signal dominates and randomness is baked into `random.choices`.
 
 from __future__ import annotations
 
+import csv
 import datetime
 import html
+import io
 import math
 import random
 import re
@@ -86,6 +88,79 @@ def add_word(conn: sqlite3.Connection, chat_id: int, text: str) -> bool:
         (chat_id, word, _now()),
     )
     return cur.rowcount > 0
+
+
+def add_words_bulk(
+    conn: sqlite3.Connection, chat_id: int, words: list[str]
+) -> dict[str, int]:
+    """Bulk-add words. Returns a count breakdown.
+
+    Each item is normalized; entries that normalize to empty count as `invalid`.
+    Returns `{"added": N, "skipped": M, "invalid": K}` where `skipped` covers
+    both pre-existing rows and within-input duplicates (both manifest as
+    `INSERT OR IGNORE` no-ops).
+    """
+    ensure_chat(conn, chat_id)
+    added = 0
+    skipped = 0
+    invalid = 0
+    now = _now()
+    for raw in words:
+        normalized = _normalize(raw)
+        if not normalized:
+            invalid += 1
+            continue
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO words(chat_id, text, added_at) VALUES (?, ?, ?)",
+            (chat_id, normalized, now),
+        )
+        if cur.rowcount > 0:
+            added += 1
+        else:
+            skipped += 1
+    return {"added": added, "skipped": skipped, "invalid": invalid}
+
+
+def parse_csv_words(text: str) -> list[str]:
+    """Extract first-column word strings from a CSV blob.
+
+    Header detection: if the first non-empty row's first cell is "text"
+    (case-insensitive) AND there is at least one further row, the first row is
+    treated as a header and dropped. This lets a one-column CSV round-trip
+    cleanly while still letting users paste a bare list (no header) into a
+    `.csv` file. Blank rows and blank first cells are skipped. Returns words
+    with whitespace stripped but NOT lowercased — `add_words_bulk` does the
+    normalization.
+    """
+    reader = csv.reader(io.StringIO(text))
+    cells: list[str] = []
+    for row in reader:
+        if not row:
+            continue
+        cell = row[0].strip()
+        if not cell:
+            continue
+        cells.append(cell)
+    if len(cells) >= 2 and cells[0].lower() == "text":
+        return cells[1:]
+    return cells
+
+
+def format_csv(words: list[str]) -> str:
+    """Serialize a list of words as a CSV string with a single `text` column.
+
+    Words are sorted alphabetically (case-insensitive) for stable diffs across
+    exports. The header row is always emitted so the file round-trips through
+    `parse_csv_words` and is forward-compatible with future label / POS
+    columns. Uses `\\n` line terminators for predictable cross-platform
+    output.
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["text"])
+    for w in sorted(words, key=str.lower):
+        writer.writerow([w])
+    return buf.getvalue()
 
 
 def remove_word(conn: sqlite3.Connection, chat_id: int, text: str) -> bool:
