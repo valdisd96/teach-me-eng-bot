@@ -443,13 +443,20 @@ def test_schedule_chat_is_idempotent(
 ) -> None:
     settings = config_flow.Settings("UTC", 2, "00:00", "23:59", "mixed", "ru")
     config_flow.save_settings(conn, CHAT, settings)
+    # Seed both calls identically so they sample the same push times — the
+    # runner uses the global `random` module, so without seeding, suite-level
+    # PRNG drift between the two calls could produce different past-slot
+    # filtering and make the cross-check below flaky.
+    random.seed(0)
     runner.schedule_chat(CHAT, settings)
     first = {j.id for j in runner.scheduler.get_jobs()}
+    random.seed(0)
     runner.schedule_chat(CHAT, settings)
     second = {j.id for j in runner.scheduler.get_jobs()}
     # Re-scheduling shouldn't leak stale jobs — plan id is stable; push ids
     # are bounded by pushes_per_day.
     assert f"plan:{CHAT}" in second
     assert len([i for i in second if i.startswith(f"push:{CHAT}:")]) <= 2
-    # Cross-check: second run didn't accumulate extras beyond the first.
-    assert len(second) <= len(first)
+    # With identical inputs the second run should produce exactly the first
+    # run's job set — no accumulation, no missing jobs.
+    assert second == first
