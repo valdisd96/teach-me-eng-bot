@@ -3,7 +3,7 @@
 #
 # Spawns a headless Claude session with the review-pr skill loaded
 # against an issue at state:in-review. Resolves the PR from the issue,
-# validates state, dispatches. Logs to logs/agents/review-<N>-<ts>.log.
+# validates state, dispatches. Logs to logs/agents/<N>/review-<ts>.log.
 #
 # Usage: scripts/agent-review.sh <issue-number>
 #
@@ -63,10 +63,10 @@ fi
 # --- log paths ----------------------------------------------------------
 
 repo_root="$(git rev-parse --show-toplevel)"
-log_dir="${repo_root}/logs/agents"
+log_dir="${repo_root}/logs/agents/${ISSUE}"
 mkdir -p "$log_dir"
 ts=$(date +%Y%m%d-%H%M%S)
-log="${log_dir}/review-${ISSUE}-${ts}.log"
+log="${log_dir}/review-${ts}.log"
 
 # --- dispatch -----------------------------------------------------------
 
