@@ -206,3 +206,117 @@ def test_ensure_chat_is_idempotent(conn: sqlite3.Connection) -> None:
     vocab.ensure_chat(conn, 42, tz="UTC")  # second call must not overwrite
     row = conn.execute("SELECT tz FROM chats WHERE chat_id = 42").fetchone()
     assert row["tz"] == "Europe/Warsaw"
+
+
+# --- bulk add / CSV import-export ------------------------------------------
+
+
+def test_add_words_bulk_inserts_new_and_normalizes(conn: sqlite3.Connection) -> None:
+    counts = vocab.add_words_bulk(conn, CHAT, ["Apple", " banana ", "CHERRY"])
+    assert counts == {"added": 3, "skipped": 0, "invalid": 0}
+    assert sorted(_all_words(conn)) == ["apple", "banana", "cherry"]
+
+
+def test_add_words_bulk_counts_duplicates_against_existing(conn: sqlite3.Connection) -> None:
+    vocab.add_word(conn, CHAT, "apple")
+    counts = vocab.add_words_bulk(conn, CHAT, ["apple", "banana"])
+    assert counts == {"added": 1, "skipped": 1, "invalid": 0}
+
+
+def test_add_words_bulk_dedupes_within_input(conn: sqlite3.Connection) -> None:
+    counts = vocab.add_words_bulk(conn, CHAT, ["apple", "Apple", "  apple  "])
+    # First is added; the rest collide with the row inserted in the same call.
+    assert counts == {"added": 1, "skipped": 2, "invalid": 0}
+    assert _all_words(conn) == ["apple"]
+
+
+def test_add_words_bulk_counts_blank_entries_as_invalid(conn: sqlite3.Connection) -> None:
+    counts = vocab.add_words_bulk(conn, CHAT, ["", "   ", "apple"])
+    assert counts == {"added": 1, "skipped": 0, "invalid": 2}
+    assert _all_words(conn) == ["apple"]
+
+
+def test_add_words_bulk_empty_input(conn: sqlite3.Connection) -> None:
+    counts = vocab.add_words_bulk(conn, CHAT, [])
+    assert counts == {"added": 0, "skipped": 0, "invalid": 0}
+
+
+def test_add_words_bulk_auto_creates_chat(conn: sqlite3.Connection) -> None:
+    vocab.add_words_bulk(conn, 7777, ["alpha"])
+    row = conn.execute("SELECT chat_id FROM chats WHERE chat_id = 7777").fetchone()
+    assert row is not None
+
+
+def test_add_words_bulk_scopes_to_chat(conn: sqlite3.Connection) -> None:
+    vocab.add_word(conn, CHAT, "apple")
+    counts = vocab.add_words_bulk(conn, CHAT + 1, ["apple"])
+    # Same text in a different chat is a fresh row, not a duplicate.
+    assert counts == {"added": 1, "skipped": 0, "invalid": 0}
+
+
+def test_parse_csv_words_drops_text_header() -> None:
+    assert vocab.parse_csv_words("text\napple\nbanana\n") == ["apple", "banana"]
+
+
+def test_parse_csv_words_header_detection_is_case_insensitive() -> None:
+    assert vocab.parse_csv_words("TEXT\napple\n") == ["apple"]
+
+
+def test_parse_csv_words_keeps_header_when_only_row() -> None:
+    # A bare list of one line where that line is "text" must not be eaten as a header.
+    assert vocab.parse_csv_words("text\n") == ["text"]
+
+
+def test_parse_csv_words_accepts_bare_list_without_header() -> None:
+    assert vocab.parse_csv_words("apple\nbanana\ncherry\n") == [
+        "apple",
+        "banana",
+        "cherry",
+    ]
+
+
+def test_parse_csv_words_skips_blank_rows_and_blank_first_cells() -> None:
+    text = "apple\n\n , extra\nbanana\n"
+    # row 2 is fully empty; row 3's first cell is blank (after strip).
+    assert vocab.parse_csv_words(text) == ["apple", "banana"]
+
+
+def test_parse_csv_words_returns_first_column_only() -> None:
+    text = "text,note\napple,fruit\nbanana,yellow\n"
+    assert vocab.parse_csv_words(text) == ["apple", "banana"]
+
+
+def test_parse_csv_words_strips_whitespace_but_preserves_case() -> None:
+    # Casing is preserved here; lowercasing happens in add_words_bulk via _normalize.
+    assert vocab.parse_csv_words("  Apple  \n  BANANA\n") == ["Apple", "BANANA"]
+
+
+def test_parse_csv_words_empty_input() -> None:
+    assert vocab.parse_csv_words("") == []
+
+
+def test_format_csv_emits_header_and_sorts_case_insensitively() -> None:
+    out = vocab.format_csv(["banana", "Apple", "cherry"])
+    assert out == "text\nApple\nbanana\ncherry\n"
+
+
+def test_format_csv_empty_list_still_writes_header() -> None:
+    assert vocab.format_csv([]) == "text\n"
+
+
+def test_format_csv_uses_lf_line_terminator() -> None:
+    out = vocab.format_csv(["apple"])
+    assert "\r" not in out
+    assert out.endswith("\n")
+
+
+def test_format_csv_quotes_cells_with_csv_special_characters() -> None:
+    # csv module must escape commas/quotes so the output round-trips cleanly.
+    out = vocab.format_csv(['needs, comma', 'has "quote"'])
+    assert vocab.parse_csv_words(out) == ['has "quote"', "needs, comma"]
+
+
+def test_csv_round_trip_preserves_words() -> None:
+    words = ["apple", "banana split", "cherry"]
+    serialized = vocab.format_csv(words)
+    assert sorted(vocab.parse_csv_words(serialized)) == sorted(words)

@@ -16,11 +16,14 @@ handling, and scheduler bootstrap.
 from __future__ import annotations
 
 import asyncio
+import csv
 import datetime
+import io
 import logging
 import os
 import random
 import sqlite3
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -68,6 +71,10 @@ CURSOR = "▌"
 EDIT_INTERVAL = 2.0   # seconds between Telegram message edits (rate-limit safe)
 MAX_MSG_LEN = 4000    # Telegram hard limit is 4096; responses past this spill into new messages
 
+IMPORT_PENDING_TTL = 300.0   # /import → upload window (seconds)
+IMPORT_MAX_BYTES = 1_000_000  # cap on uploaded CSV size
+IMPORT_MAX_ROWS = 5000        # cap on rows accepted per import
+
 ROOT = Path(__file__).resolve().parent
 LOGS_DIR = ROOT / "logs"
 CONVS_DIR = LOGS_DIR / "convs"
@@ -111,6 +118,9 @@ conv_paths: dict[int, Path] = {}
 sessions: dict[int, config_flow.ConfigSession] = {}
 # Tokens → (chat_id, word) for pending /translate "Add to vocab" buttons.
 pending_vocab: translator.PendingVocab = translator.PendingVocab()
+# Chats that recently issued /import: chat_id → expiry monotonic timestamp.
+# The next document upload from these chats is parsed as a vocab CSV.
+import_pending: dict[int, float] = {}
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -246,6 +256,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("add", "Add a word or phrase to this chat's vocab"),
     ("remove", "Remove a word or phrase from vocab"),
     ("list", "List vocab words (optionally filter by substring)"),
+    ("import", "Bulk-import vocab from a CSV file (one word per row)"),
+    ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
     ("clear", "Reset the chat history (LLM memory)"),
@@ -393,6 +405,103 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(body) > MAX_MSG_LEN - len(header) - 32:
         body = body[: MAX_MSG_LEN - len(header) - 32] + "\n…"
     await update.message.reply_text(f"{header}\n{body}")
+
+
+async def cmd_import(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    import_pending[chat_id] = time.monotonic() + IMPORT_PENDING_TTL
+    await update.message.reply_text(
+        "Send me a CSV file to import.\n"
+        "• One word or phrase per row, in the first column.\n"
+        "• An optional `text` header row is supported.\n"
+        "• Existing words are kept; duplicates are skipped.\n"
+        f"(Times out in {int(IMPORT_PENDING_TTL // 60)} minutes; "
+        f"max {IMPORT_MAX_ROWS} rows / {IMPORT_MAX_BYTES // 1000} KB.)"
+    )
+
+
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    rows = vocab.list_words(conn, chat_id)
+    if not rows:
+        await update.message.reply_text(
+            "Your vocab is empty. Add words with /add or /import."
+        )
+        return
+    csv_text = vocab.format_csv([r["text"] for r in rows])
+    today = datetime.date.today().isoformat()
+    filename = f"vocab-{today}.csv"
+    await update.message.reply_document(
+        document=io.BytesIO(csv_text.encode("utf-8")),
+        filename=filename,
+        caption=f"{len(rows)} words",
+    )
+
+
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Receive a document upload as a CSV-vocab import.
+
+    Only fires when the chat recently issued `/import` and the pending entry
+    has not expired — uploads outside that window are ignored silently so the
+    handler doesn't catch unrelated files.
+    """
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    expiry = import_pending.pop(chat_id, None)
+    if expiry is None or expiry < time.monotonic():
+        return
+
+    document = update.message.document
+    if document is None:
+        return
+    if document.file_size and document.file_size > IMPORT_MAX_BYTES:
+        await update.message.reply_text(
+            f"⚠️ File too large ({document.file_size} bytes; "
+            f"max {IMPORT_MAX_BYTES})."
+        )
+        return
+
+    file = await context.bot.get_file(document.file_id)
+    blob = await file.download_as_bytearray()
+    if len(blob) > IMPORT_MAX_BYTES:
+        await update.message.reply_text(
+            f"⚠️ File too large ({len(blob)} bytes; max {IMPORT_MAX_BYTES})."
+        )
+        return
+    try:
+        # utf-8-sig also handles UTF-8-BOM-prefixed exports from Excel.
+        text = bytes(blob).decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        await update.message.reply_text(f"⚠️ Could not decode file as UTF-8: {e}")
+        return
+    try:
+        words = vocab.parse_csv_words(text)
+    except csv.Error as e:
+        await update.message.reply_text(f"⚠️ Could not parse CSV: {e}")
+        return
+    if not words:
+        await update.message.reply_text("No words found in the file.")
+        return
+    if len(words) > IMPORT_MAX_ROWS:
+        await update.message.reply_text(
+            f"⚠️ Too many rows ({len(words)}; max {IMPORT_MAX_ROWS})."
+        )
+        return
+    counts = vocab.add_words_bulk(conn, chat_id, words)
+    parts = [
+        f"added: {counts['added']}",
+        f"skipped (duplicate): {counts['skipped']}",
+    ]
+    if counts["invalid"]:
+        parts.append(f"skipped (empty): {counts['invalid']}")
+    await update.message.reply_text("Imported. " + ", ".join(parts) + ".")
 
 
 async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -750,6 +859,8 @@ def main() -> None:
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("import", cmd_import))
+    app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
     app.add_handler(CommandHandler("translate", cmd_translate))
 
@@ -758,6 +869,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_add_vocab, pattern=r"^av:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
 
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     log.info("Bot started. Polling...")
