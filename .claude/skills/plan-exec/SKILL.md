@@ -139,6 +139,7 @@ Follow the `dev-flow` skill. Specifically:
 - Match the project's module layout — `bot.py` is wiring; logic lives in `vocab.py`, `llm.py`, `scheduler.py`, etc.
 - Keep helpers pure and injectable. Test seams matter for Stage 2.
 - Update `.env.example` and the env table in `CLAUDE.md` if you add a new variable.
+- If you add, rename, or remove a slash command, update `COMMANDS` in `bot.py` (drives `/help` and Telegram's `set_my_commands`), the `HELP_TEXT` getting-started prose if user flow changes, and the `CLAUDE.md` Bot commands table — otherwise the feature is invisible in the bot UI.
 
 **Do NOT write tests yourself.** Stage 2 (test-writer) writes the tests in a fresh session. You write the implementation only. The exception: if existing tests need updating because behaviour legitimately changed, update them as part of your commit.
 
