@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SERVICE=gemma-rpi-agent
+SERVICE=teach-me-eng-bot
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 cp "$REPO_DIR/$SERVICE.service" /etc/systemd/system/

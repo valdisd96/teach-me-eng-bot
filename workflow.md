@@ -136,7 +136,7 @@ Auto-merge means the reviewer is the last line of defense. The `review-pr` skill
 - **CI/workflow tampering.** `.github/workflows/**` changes that add network egress, disable checks, or modify permissions. Any suspicious change → `state:blocked`.
 - **Schema and data-loss risk.** `db.py` migrations that drop columns, change PKs, or break the FSRS columns. Any destructive migration → `state:blocked`.
 - **Dependency additions.** New entries in `requirements.txt` — verify the package exists, is the right name (no typo-squatting), and pinned to a known version. Suspect addition → `state:blocked`.
-- **Service / install scripts.** Changes to `gemma-rpi-agent.service` or `install-service.sh` — flag for human review (`state:blocked`).
+- **Service / install scripts.** Changes to `teach-me-eng-bot.service` or `install-service.sh` — flag for human review (`state:blocked`).
 - **Scope drift.** PR diff is materially larger than the issue body suggests. → `state:needs-rework`.
 - **Test coverage.** New code paths without corresponding tests. → `state:needs-rework`.
 
@@ -175,7 +175,7 @@ Only issues whose `author.login == valdisd96` are processed. Issues from externa
 
 ### Concurrency
 
-Single `flock`-based lock file at `/tmp/gemma-orchestrator.lock`. One issue end-to-end at a time across the whole pipeline. If a stage is running when the next tick fires, the tick is a no-op.
+Single `flock`-based lock file at `/tmp/teach-me-eng-bot-orchestrator.lock`. One issue end-to-end at a time across the whole pipeline. If a stage is running when the next tick fires, the tick is a no-op.
 
 ### Model
 
@@ -206,19 +206,19 @@ Each agent script:
 
 ## Deployment (VPS)
 
-The orchestrator runs on a VPS (separate from the Pi running the live bot, to avoid resource contention with llama.cpp). Required:
+The orchestrator runs on a VPS. Required:
 
 - `git`, `gh`, `python3.11+`, `claude` CLI installed.
 - Repo cloned, `.venv` activated.
 - `gh auth login` and `claude login` completed.
 - Systemd unit installed:
   ```
-  [Unit]   Description=gemma-rpi-agent orchestrator
+  [Unit]   Description=teach-me-eng-bot orchestrator
   [Service] Type=simple
-            ExecStart=/srv/gemma-rpi-agent/scripts/orchestrator.sh
+            ExecStart=/srv/teach-me-eng-bot/scripts/orchestrator.sh
             Restart=always
-            User=gemma
-            WorkingDirectory=/srv/gemma-rpi-agent
+            User=teach-me-eng-bot
+            WorkingDirectory=/srv/teach-me-eng-bot
   [Install] WantedBy=multi-user.target
   ```
 - Logs in `logs/orchestrator.log` (rotated) and `logs/agents/*`.

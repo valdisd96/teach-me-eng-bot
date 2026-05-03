@@ -1,0 +1,17 @@
+[Unit]
+Description=teach-me-eng-bot Telegram bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/teach-me-eng-bot
+EnvironmentFile=/root/teach-me-eng-bot/.env
+ExecStart=/root/teach-me-eng-bot/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
