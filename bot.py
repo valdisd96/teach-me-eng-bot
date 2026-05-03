@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Gemma 4 Telegram bot — streaming chat + FSRS-driven vocab agent.
+"""teach-me-eng-bot — streaming chat + FSRS-driven vocab agent.
 
 Split responsibilities:
-  * llm.py           — llama.cpp client (stream + one-shot + health)
+  * llm.py           — OpenAI-compatible chat client (stream + one-shot + health)
   * vocab.py         — vocabulary CRUD, FSRS rating, weighted selection
   * prompts.py       — tone templates + just-talk system prompt composer
   * config_flow.py   — /start state machine for per-chat settings

@@ -4,7 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A Telegram bot that streams responses from a local **Gemma 4** model running via **llama.cpp**'s OpenAI-compatible HTTP server on `http://127.0.0.1:8080`, plus an **FSRS-driven English-vocabulary agent**: the user adds words with `/add`, and the bot sends scheduled push messages that use those words in short tone-flavoured snippets. Rating buttons (✅ knew / ❌ forgot) update FSRS state per word. Plain chat messages still stream live via placeholder message edits.
+This repo is two layers stacked on top of each other:
+
+1. **An autonomous agent fabric** that ships code from a GitHub issue all the way to a merged PR with no human in the middle. Three Claude agents run in series — `plan-exec` → `test-writer` → `review-pr` — coordinated by a polling orchestrator that watches `state:*` issue labels. The user only files issues, answers clarification comments, and un-blocks parked issues. See `workflow.md` for the state machine and `orchestrator-plan.md` for the dispatcher design.
+2. **A Telegram English-tutor bot** built *by* that fabric — the worked example. Users add vocabulary with `/add`; the bot sends FSRS-scheduled push messages that use those words in short tone-flavoured snippets, with ✅ knew / ❌ forgot buttons that update each word's FSRS state. Plain chat messages stream live replies from any OpenAI-compatible chat-completions endpoint with the chat's vocab injected as soft hints.
+
+When working in this repo: changes are routed through the agent pipeline (issues + the `dev-flow` skill), not direct commits to `main`. Treat the bot's modules as the artifact under maintenance and the `.claude/skills/`, `scripts/agent-*.sh`, and `workflow.md` files as the fabric maintaining it.
 
 ## Setup
 
@@ -27,7 +32,7 @@ python bot.py
 source .venv/bin/activate && python -m pytest -q    # run tests
 ```
 
-The llama.cpp server must already be running on `http://127.0.0.1:8080` before starting the bot.
+The bot needs an OpenAI-compatible chat-completions endpoint reachable per `LLM_BACKEND`. Default backend is a local server on `http://127.0.0.1:8080`; production deployments use `LLM_BACKEND=openrouter`.
 
 ## Issue-driven workflow
 
@@ -40,9 +45,9 @@ GitHub issues are the unit of work. Each issue carries a `state:*` label that tr
 | `TELEGRAM_TOKEN` | Yes | — |
 | `SYSTEM_PROMPT` | No | `"You are a friendly English tutor chatting casually with a learner. Use natural, everyday English. If they ask about grammar, vocabulary, or usage, explain briefly with a small example."` |
 | `ALLOWED_USER_IDS` | No | empty (allow all) — comma/whitespace-separated Telegram user IDs; if set, other users are silently ignored and logged |
-| `LLM_BACKEND` | No | `llama` — local llama.cpp on `http://127.0.0.1:8080`. Set to `openrouter` to route chat completions to OpenRouter instead (useful when developing off-Pi). |
+| `LLM_BACKEND` | No | `llama` — local OpenAI-compatible server on `http://127.0.0.1:8080`. Set to `openrouter` to route chat completions to OpenRouter instead (the production backend). |
 | `OPENROUTER_API_KEY` | When `LLM_BACKEND=openrouter` | — sent as `Authorization: Bearer <key>`. Empty value with `LLM_BACKEND=openrouter` raises at the first LLM call. |
-| `OPENROUTER_MODEL` | No | `google/gemma-4-26b-a4b-it:free`. Free-tier model, used for smoke testing only — responses will diverge from the Pi's Gemma-4. |
+| `OPENROUTER_MODEL` | No | A free-tier OpenRouter model id (see `.env.example` for the current default). Override to swap models without code changes. |
 
 Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are collected via the `/start` conversation flow and stored in SQLite — they are **not** environment variables.
 
@@ -60,7 +65,7 @@ Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are
 | `/export` | Send this chat's vocab back as a CSV attachment (`vocab-YYYY-MM-DD.csv`), one word per row, alphabetically sorted, with a `text` header. FSRS state is **not** exported. |
 | `/resetvocab` | Wipes the chat's vocabulary (with a confirm button). |
 | `/translate <text>` | Google-translate the args (or, if sent as a reply, the replied message) into the chat's configured target language. If the input is written in the target's script (e.g. Cyrillic for `ru`), reverse-translate it to English instead. The reply carries an `➕ Add to vocab` button that, when tapped, adds the English side of the pair (the source when forward-translating, the translation when reverse-translating) to this chat's vocab — the button label flips to `added to vocab ✅` or `already in vocab`. Phrases longer than 5 words skip the button and show the inline note `not added (N words)`. Does **not** invoke the LLM. Reverse detection only fires for non-Latin targets. |
-| `/status` | Host diagnostics (hardware, OS, load, temp, disk free), vocab count for the chat, llama.cpp endpoint/health, and a short model bench (chars + tok/s, `model not responding` on 30 s timeout). |
+| `/status` | Host diagnostics (hardware, OS, load, temp, disk free), vocab count for the chat, LLM endpoint/health, and a short model bench (chars + tok/s, `model not responding` on 30 s timeout). |
 
 Plain (non-slash) messages go through the **just-talk** flow: the chat history is passed to the model with the current vocab list injected into the system prompt as soft hints. Any vocab words that appear literally in the reply bump `mention_count` and update `last_used_at`.
 
@@ -71,12 +76,12 @@ Scheduled **pushes** send 1 short snippet using 1 vocab word at a time, in the c
 Code is split into focused modules (entrypoint is `bot.py`):
 
 - **`bot.py`** — python-telegram-bot wiring. Command/callback/message handlers, scheduler bootstrap, transcript/history management, DB connection lifecycle.
-- **`llm.py`** — llama.cpp HTTP client. `stream_chat()` for live edits, `chat()` one-shot for pushes, `health()` and `bench()` for `/status`. SSE/completion parsing is factored into pure helpers.
-- **`sysinfo.py`** — pure readers for host diagnostics used by `/status` (hardware, OS, load, temp, disk free). Each reader has an injectable dependency and a safe fallback so /status works off-Pi too.
+- **`llm.py`** — OpenAI-compatible HTTP client (local server or OpenRouter, selected by `LLM_BACKEND`). `stream_chat()` for live edits, `chat()` one-shot for pushes, `health()` and `bench()` for `/status`. SSE/completion parsing is factored into pure helpers.
+- **`sysinfo.py`** — pure readers for host diagnostics used by `/status` (hardware, OS, load, temp, disk free). Each reader has an injectable dependency and a safe fallback so `/status` works on hosts that don't expose the underlying files.
 - **`vocab.py`** — vocabulary CRUD, literal mention scanning, FSRS rating (`rate_word`), and the weighted-random `select_word`. Uses `py-fsrs` with `desired_retention=0.95` and `maximum_interval=7d` so review intervals stay tight.
 - **`prompts.py`** — tone-flavoured push templates and the just-talk system-prompt composer that appends the chat's vocab as soft hints.
 - **`config_flow.py`** — `Settings` dataclass + `ConfigSession` state machine for `/start`; per-step validators (IANA tz, 6–12 pushes, HH:MM, known tone, known target language via `translator.normalize_target`); `save_settings` / `load_settings` upsert against the `chats` table.
-- **`translator.py`** — thin wrapper around `deep_translator.GoogleTranslator` for `/translate`. `normalize_target` maps a name or ISO code to an ISO code (no network); `translate(text, target, source='auto')` does the Google call; `is_target_script(text, target)` decides reverse-translate intent by Unicode script; `vocab_target` picks the English side of the pair (source for forward, translation for reverse); `format_vocab_note` builds the 1-line vocab-add status shown inline when the 5-word cap is exceeded; `PendingVocab` is the short-token↔word registry backing the `➕ Add to vocab` button. Explicitly bypasses the LLM because Gemma's Russian translations are weak.
+- **`translator.py`** — thin wrapper around `deep_translator.GoogleTranslator` for `/translate`. `normalize_target` maps a name or ISO code to an ISO code (no network); `translate(text, target, source='auto')` does the Google call; `is_target_script(text, target)` decides reverse-translate intent by Unicode script; `vocab_target` picks the English side of the pair (source for forward, translation for reverse); `format_vocab_note` builds the 1-line vocab-add status shown inline when the 5-word cap is exceeded; `PendingVocab` is the short-token↔word registry backing the `➕ Add to vocab` button. Explicitly bypasses the LLM because small free-tier models translate weakly into non-English scripts.
 - **`scheduler.py`** — `plan_push_times` (equal-bucket sampling with half-gap edge buffers), `compose_push` (select + LLM call + retry once if the word didn't appear literally), `log_push` / `mark_rated`, and `PushRunner` wrapping `AsyncIOScheduler` with per-chat daily re-planning at 00:01 local.
 - **`db.py`** — SQLite schema (`chats`, `words`, `push_log`) with FSRS columns on `words`; `connect()` sets WAL + `PRAGMA foreign_keys=ON`; `init_db()` applies forward-only column migrations.
 - **`tests/`** — pytest suite covering schema constraints, vocab CRUD, mention scanning, FSRS state transitions, selection-weight math, deterministic weighted sampling, prompt composition, tz/time validators, config session transitions, plan_push_times determinism + min-gap, compose_push retry paths, push_log roundtrip, PushRunner job registration.
@@ -111,6 +116,6 @@ Each factor lives in `[0, 1]`, lifted to `[1, 2]` so no single signal dominates.
 ## Key constants
 
 - `bot.py`: `EDIT_INTERVAL = 2.0` (seconds between stream edits), `MAX_MSG_LEN = 4000` (per-message cap; long responses spill into additional messages).
-- `llm.py`: `LLAMA_URL`, `MODEL = "gemma4"`.
+- `llm.py`: `LLAMA_URL`, `MODEL = "gemma4"` (model id sent to the local backend; OpenRouter uses `OPENROUTER_MODEL`).
 - `vocab.py`: `FSRS_RETENTION = 0.95`, `FSRS_MAX_DAYS = 7`, `RECENCY_TAU_DAYS = 7.0`.
 - `scheduler.py`: `MIN_GAP_MIN = 45` (minimum spacing between consecutive pushes, enforced implicitly by the bucket algorithm).

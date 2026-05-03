@@ -71,7 +71,7 @@ For each trigger below, scan the diff. Any single hit → BLOCK (skip to step 6)
 - **CI / workflow tampering.** Any change under `.github/workflows/**`. New action that fetches arbitrary URLs, disables a check, alters `permissions:` block, or adds a new secret reference. Block on any non-trivial change here; tiny changes (e.g. version bump in an existing pinned action) are still worth a human eye.
 - **Schema / data-loss risk.** Changes to `db.py` that drop columns, alter primary keys, change foreign-key cascades, or modify FSRS columns (`stability`, `difficulty`, `state`, `step`, `due`, `reps`, `lapses`, `last_review`). Adding a column is fine; removing or rewriting one is not.
 - **Dependency additions.** New entries in `requirements.txt`. Verify the package name is the canonical one (no typo-squatting — e.g. `python-telegrm-bot` is wrong). Verify version pinning is present. If unfamiliar, block and ask the user to vet.
-- **Service / install scripts.** Any change to `gemma-rpi-agent.service` or `install-service.sh`. These run on the live Pi; humans should eyeball.
+- **Service / install scripts.** Any change to `teach-me-eng-bot.service` or `install-service.sh`. These run on the live host; humans should eyeball.
 - **Scope drift.** PR diff is materially larger than the issue body suggests, OR touches modules unrelated to the issue. Examples: issue says "fix typo in /help text" but PR refactors three modules. This is REJECT (rework, scope reduction), not BLOCK — unless the unrelated changes themselves trip a safety trigger.
 
 ### 5. Run the quality checklist
