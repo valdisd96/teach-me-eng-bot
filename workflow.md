@@ -72,6 +72,41 @@ A single-issue serial pipeline where three Claude agents — plan-exec, test-wri
 
 Three human gates only: **filing the issue**, **answering clarifications**, **un-blocking parked issues**.
 
+## Epic decomposition (pre-Stage-1)
+
+A fourth route for issues too big for one PR. Filed with `type:epic`, they bypass plan-exec and go to a dedicated decomposition skill that splits them into normal child issues which then enter the main pipeline one at a time.
+
+```
+user files type:epic issue (state:needs-planning)
+     │
+     ▼
+┌─────────────────────────────────────────────────────────────┐
+│ pre-Stage-1 — epic-decompose                                │
+│ Skill: epic-decompose                                       │
+│ Script: scripts/agent-epic-decompose.sh                     │
+│                                                             │
+│ One dispatch = one round. Decision tree per dispatch:       │
+│   • approval seen (/decompose-ok) → file children           │
+│   • round cap (≥ 8 Qs) → force proposal w/ low-confidence   │
+│   • have enough info → propose                              │
+│   • otherwise → ask the next focused question               │
+│                                                             │
+│ Q round → state:clarification-needed (user answers)         │
+│ Propose round → state:awaiting-decompose-approval           │
+│ File-children round → state:tracking                        │
+└─────────────────────────────────────────────────────────────┘
+     │
+     ▼ children filed with Refs #<parent>, type:feat|fix|chore|refactor
+     │ each child enters the main three-stage pipeline normally
+     │
+     ▼ all children closed → parent closes (orchestrator coordinator;
+                              manual close until that ships)
+```
+
+The parent at `state:tracking` is the "loop until done" pattern — it just waits for its children to drain through the regular pipeline. There is no integration / smoke pass on the parent in v1; cross-issue bugs that ship are caught by use and filed as fresh issues (consistent with the rest of the pipeline's auto-merge posture).
+
+The user gates are: filing the epic, answering Q-round clarifications, **approving the proposed decomposition with `/decompose-ok`**, and (for now) closing the parent once children merge. `agent-plan-exec.sh` refuses `type:epic` issues so a misfire can't land an epic in the wrong stage.
+
 ### Plan comments (`<!-- agent-plan v1 -->`)
 
 Before implementing, plan-exec posts a single issue comment whose body starts with the marker line `<!-- agent-plan v1 -->`. The comment has two halves:
@@ -93,19 +128,21 @@ The full label set lives in `scripts/setup-labels.sh` (idempotent — safe to re
 
 | Label | Set by | Means |
 |---|---|---|
-| `state:needs-planning` | user (or implicit — fresh unlabelled issues are treated as if they had this) | Untouched. Stage 1 will pick this up. |
-| `state:in-progress` | Stage 1 (plan-exec, at start) | Plan-exec is working. |
-| `state:clarification-needed` | Stage 1 (clarify-issue) | **HUMAN GATE.** Question posted, waiting on user. Orchestrator skips. |
+| `state:needs-planning` | user (or implicit — fresh unlabelled issues are treated as if they had this) | Untouched. Stage 1 (or epic-decompose for `type:epic`) will pick this up. |
+| `state:in-progress` | Stage 1 (plan-exec) or epic-decompose (at start) | Working. |
+| `state:clarification-needed` | Stage 1 (clarify-issue) or epic-decompose (Q round) | **HUMAN GATE.** Question posted, waiting on user. Orchestrator skips. |
 | `state:tests-pending` | Stage 1 (at end, after commit) | Branch + commit ready, awaiting test-writer. |
 | `state:in-review` | Stage 2 (after tests green + PR opened) | Reviewer's turn. |
 | `state:needs-rework` | Stage 2 (test failure) or Stage 3 (review failure) | Back to Stage 1. |
+| `state:awaiting-decompose-approval` | epic-decompose (proposal round) | **HUMAN GATE.** Proposed child list posted; waiting on `/decompose-ok` and a flip back to `state:needs-planning`. |
+| `state:tracking` | epic-decompose (file-children round) | Epic parent — children filed; waits for them to all close. Coordinator (TBD) auto-closes the parent. |
 | `state:blocked` | Stage 3 or anyone manually | Stop. **HUMAN GATE.** Park reason in comment. |
 
 **Fresh issues are unlabelled.** New issues filed without any `state:*` label are treated as equivalent to `state:needs-planning` — Stage 1 (plan-exec) accepts them and applies the label as part of its initial flip to `state:in-progress`. The user does not need to manually label new issues.
 
 ### Type, priority, area (unchanged)
 
-`type:feat`, `type:fix`, `type:chore`, `type:refactor`
+`type:feat`, `type:fix`, `type:chore`, `type:refactor`, `type:epic` (decomposed by `epic-decompose`; never branched directly)
 `priority:high`, `priority:medium`, `priority:low`
 `area:bot`, `area:vocab`, `area:scheduler`, `area:llm`, `area:translator`, `area:config`, `area:db`
 
@@ -121,6 +158,7 @@ Three skills under `.claude/skills/`. Each is auto-loaded in any Claude session 
 
 | Skill | Stage | Session | Outputs |
 |---|---|---|---|
+| `epic-decompose` | pre-1 (`type:epic` only) | Fresh per round | Q comment, proposal comment, or filed child issues + `state:tracking`. |
 | `plan-exec` | 1 | Combined plan + implement | Branch + commit; label flip; or clarification comment. Folds the old `plan-issue` skill's role into the implementer. |
 | `clarify-issue` | sub-skill of 1 | — | Posts a focused question, flips label, stops. Already exists; minor wording. |
 | `test-writer` | 2 | Fresh | Tests under `tests/`, pushed branch, opened PR; or rework comment. |
@@ -190,6 +228,7 @@ All agents run on **Opus 4.7** (`claude-opus-4-7`), passed via `claude -p --mode
 
 ```
 scripts/
+  agent-epic-decompose.sh <issue#>   — pre-Stage-1 for type:epic (one round per call)
   agent-plan-exec.sh    <issue#>     — Stage 1, manual or orchestrated
   agent-test-write.sh   <issue#>     — Stage 2
   agent-review.sh       <issue#>     — Stage 3 (resolves PR from issue)

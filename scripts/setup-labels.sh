@@ -20,19 +20,23 @@ create() {
 
 # State (blue) — workflow position; one-of, flips as the issue moves.
 # See workflow.md (State labels) for the full state machine.
-create "state:needs-planning"       "1d76db" "Untouched. Stage 1 (plan-exec) will pick this up"
-create "state:in-progress"          "1d76db" "Plan-exec is working on this issue"
-create "state:clarification-needed" "1d76db" "Agent posted a question; awaiting user input"
-create "state:tests-pending"        "1d76db" "Branch + commit ready; awaiting test-writer"
-create "state:in-review"            "1d76db" "PR open; reviewer is evaluating"
-create "state:needs-rework"         "1d76db" "Test or review failed; back to Stage 1"
-create "state:blocked"              "1d76db" "Stopped — needs human attention (cycle-limit, sensitive content, etc.)"
+create "state:needs-planning"               "1d76db" "Untouched. Stage 1 (plan-exec) will pick this up"
+create "state:in-progress"                  "1d76db" "Plan-exec is working on this issue"
+create "state:clarification-needed"         "1d76db" "Agent posted a question; awaiting user input"
+create "state:tests-pending"                "1d76db" "Branch + commit ready; awaiting test-writer"
+create "state:in-review"                    "1d76db" "PR open; reviewer is evaluating"
+create "state:needs-rework"                 "1d76db" "Test or review failed; back to Stage 1"
+create "state:awaiting-decompose-approval"  "1d76db" "Epic-decompose posted a proposal; awaiting /decompose-ok"
+create "state:tracking"                     "1d76db" "Epic — children filed; waiting for them to all close"
+create "state:blocked"                      "1d76db" "Stopped — needs human attention (cycle-limit, sensitive content, etc.)"
 
-# Type (green) — maps 1:1 to dev-flow branch prefixes.
+# Type (green) — maps 1:1 to dev-flow branch prefixes (epic is the exception:
+# it has no branch — agent-epic-decompose.sh splits it into typed children).
 create "type:feat"     "0e8a16" "New behaviour"
 create "type:fix"      "0e8a16" "Bug fix"
 create "type:chore"    "0e8a16" "Tooling, deps, docs"
 create "type:refactor" "0e8a16" "No behaviour change"
+create "type:epic"     "0e8a16" "Big feature — agent-epic-decompose.sh splits it into typed children"
 
 # Priority (red→amber→light) — user assigns; default medium.
 create "priority:high"   "d73a4a" "Urgent / blocking"
