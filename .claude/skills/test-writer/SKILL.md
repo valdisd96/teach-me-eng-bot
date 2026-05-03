@@ -1,17 +1,20 @@
 ---
 name: test-writer
-description: Stage 2 of the autonomous pipeline. FRESH session — no plan-exec rationale beyond the issue's `<!-- agent-plan v1 -->` comment. Invoked headlessly by scripts/agent-test-write.sh on a state:tests-pending issue. Locates the implementation branch left by plan-exec, reads the latest agent-plan comment for intent, reads the branch diff (excluding existing test changes), writes new tests for the new code paths matching project style, runs pytest. On green commits the tests, pushes, opens or updates the PR with `Closes #<N>`, flips state:tests-pending → state:in-review. On red after self-checking that the test reflects the diff's actual behaviour, comments on the issue with the failure, flips state:tests-pending → state:needs-rework, and leaves the broken state local-only. Never modifies code outside tests/.
-version: 1.1.0
+description: Stage 2 of the autonomous pipeline. FRESH session — spec-driven, not diff-driven. Invoked headlessly by scripts/agent-test-write.sh on a state:tests-pending issue. Locates the implementation branch left by plan-exec, reads the Behavioral spec block in the latest `<!-- agent-plan v1 -->` comment, lists public signatures from the diff (never bodies), outputs a test plan mapping each acceptance criterion to a test, writes tests that cite their AC IDs, runs pytest, and verifies AC traceability. On green commits the tests, pushes, opens or updates the PR with `Closes #<N>`, flips state:tests-pending → state:in-review. On red after confirming the failure traces back to a numbered AC, comments on the issue with the failure, flips to state:needs-rework, and leaves draft tests local-only. Bounces back if the spec block is missing. Never modifies code outside tests/.
+version: 1.2.0
 ---
 
 # test-writer
 
-Stage 2 of the issue → merged pipeline (`workflow.md`). FRESH session — you do not see plan-exec's reasoning live, only the code it produced and a brief `<!-- agent-plan v1 -->` comment it left on the issue. The point: test what the code does, not what the issue asked for. The plan comment is context for *why*; the diff is still the source of truth for *what*.
+Stage 2 of the issue → merged pipeline (`workflow.md`). FRESH session — you do not see plan-exec's reasoning live, only the **Behavioral spec** block it published in the latest `<!-- agent-plan v1 -->` comment. The point: test what the spec promises, not what the diff happens to do. Tests derived from implementation are coupled to implementation; tests derived from the spec survive refactors and catch drift.
 
 ## Hard boundaries
 
 You MAY:
-- Read code anywhere in the repo.
+- Read the **Behavioral spec** block of the latest `<!-- agent-plan v1 -->` comment.
+- Read existing files under `tests/` (style, fixtures, mocking patterns).
+- Read public signatures from the diff (top-level `def` / `async def` / `class` lines, and signatures of changed methods). **Lines, not bodies.**
+- Read `CLAUDE.md`, `.env.example`, `requirements.txt`, `tests/conftest.py` for project conventions.
 - Edit / create files **inside `tests/`** only.
 - Run `pytest`.
 - `git add tests/...; git commit ...` (tests-only commits).
@@ -21,7 +24,9 @@ You MAY:
 - Flip issue labels.
 
 You MUST NOT:
-- Edit any file outside `tests/`. If the code under test is wrong, that's plan-exec's job to fix on the next cycle.
+- Read function / method **bodies** of files outside `tests/`. The Behavioral spec is your only input for *what* to test; signatures are for *what symbols exist*. If the spec is missing or thin, bounce back — never recover by reading the implementation.
+- Infer behaviour from the diff. Drift between the spec and the diff is plan-exec's bug, not yours to paper over.
+- Edit any file outside `tests/`. If the code under test is wrong, that's plan-exec's job on the next cycle.
 - `gh pr merge` — Stage 3.
 - `gh issue close`.
 - `git push` when tests are red.
@@ -54,46 +59,90 @@ git fetch origin "$BRANCH" 2>/dev/null || true
 git checkout "$BRANCH"
 ```
 
-### 2. Read plan-exec's intent
+### 2. Read the Behavioral spec
 
-plan-exec leaves a plan comment on the issue tagged `<!-- agent-plan v1 -->`. Fetch the **latest** one (rework cycles append a fresh plan each pass) and read it for context — to understand which behaviours are being introduced and why this shape was chosen. The diff is still the source of truth for what to test; the plan tells you the goal.
-
-```bash
-gh issue view <N> --json comments -q \
-  '[.comments[] | select(.body | startswith("<!-- agent-plan"))] | last | .body // ""'
-```
-
-If no plan comment exists (older issues, or a plan-exec run that pre-dates this convention), proceed without it — the diff alone is enough. Do not bounce-back over a missing plan comment.
-
-### 3. Read the diff
+Fetch the **latest** `<!-- agent-plan v1 -->` comment (rework cycles append fresh ones) and extract its Behavioral spec block. This is your only authoritative input.
 
 ```bash
-git diff main...HEAD -- ':!tests/'
+COMMENT=$(gh issue view <N> --json comments -q \
+  '[.comments[] | select(.body | startswith("<!-- agent-plan"))] | last | .body // ""')
+
+SPEC=$(printf '%s\n' "$COMMENT" | awk '/^## Behavioral spec/,0')
 ```
 
-Excluding `tests/` is deliberate. You write the tests; you do not let plan-exec's test edits anchor your judgment.
+Branch on what you find:
 
-### 4. Decide: do new code paths exist?
+- **`**Behavioral spec:** none — cosmetic / refactor only.`** — plan-exec declared this diff is behaviour-free. Confirm via the signatures-only diff in step 3 that no new public symbols appear. If signatures *are* added, plan-exec was lying; bounce back. Otherwise skip to step 8 and push without a test commit.
+- **A populated spec block** — proceed to step 3.
+- **No spec block, or the block is empty / hand-wavy** (no numbered ACs, no edge cases, no error conditions) — bounce back. Test-writer is spec-driven; you do not infer the spec from the code. Comment template:
 
-If the diff is purely cosmetic (docstring, comment, whitespace), no new tests are needed — skip to step 7 and open the PR with no test commit.
+```bash
+gh issue comment <N> --body "$(cat <<'EOF'
+**Test-writer bounce-back**
 
-If the diff adds new functions, branches, error paths, or behaviour, you owe tests for them. Match the existing test style — open `tests/` and read a few files first:
+The latest \`<!-- agent-plan v1 -->\` comment lacks a usable **Behavioral spec** section (or it lacks numbered acceptance criteria, edge cases, and error conditions). Test-writer is spec-driven; without a contract to assert against, no tests can be derived.
 
-- One test file per source module (`test_vocab.py` covers `vocab.py`).
-- Pure helpers tested directly. Async paths use `pytest.mark.asyncio`.
-- Network / DB / Telegram are mocked or use the `httpx.MockTransport` / temp-DB patterns already in the suite.
-- One concept per test function. Test names describe the behaviour, not the function name.
-- `from __future__ import annotations` at the top of each test module.
+Returning to plan-exec to add the spec block per the plan-exec skill template.
+EOF
+)"
+
+gh issue edit <N> \
+  --remove-label "state:tests-pending" \
+  --add-label "state:needs-rework"
+```
+
+Then **stop**. No push, no draft tests committed.
+
+### 3. List public signatures (no bodies)
+
+You may verify that the public API listed in the spec actually exists in the diff, and that no new public symbols are missing from the spec. Read **signatures only** — never function bodies.
+
+```bash
+git diff main...HEAD -U0 -- '*.py' ':!tests/' \
+  | grep -E '^\+\s*(def |async def |class )' \
+  | sed 's/^+//'
+```
+
+If the spec lists a symbol the diff does not define, or the diff defines a public symbol the spec omits, that is spec/code drift — bounce back. Do not paper over by writing tests for what you guess the symbol does.
+
+### 4. Output the test plan
+
+Before writing a single test, print a plan to stdout that maps each AC, each enumerated edge case, and each error condition to a named test. This is the spec → test traceability that gives the suite its value.
+
+```
+Test plan for issue #<N>:
+
+  test_<name>             # AC1 — <one-line restatement>
+  test_<name>             # AC2
+  test_<name>             # AC3, AC4 — combined (collapsing two ACs into one test is fine if explicit)
+  test_<name>             # edge: empty input
+  test_<name>             # edge: max boundary
+  test_<name>             # error: bad type → ValueError
+```
+
+Every numbered AC must appear at least once. Every edge case and error condition the spec lists must appear at least once. If you cannot map an AC to a concrete test (e.g. it's an internal property the spec mistakenly exposes), bounce back rather than fudge.
 
 ### 5. Write the tests
 
-Edit / create files in `tests/` only. Cover, in this order of priority:
+Edit or create files in `tests/` only. Match the existing project style — open `tests/conftest.py` and 2–3 representative `test_*.py` files first:
 
-1. The happy path of each new public function or new code branch.
-2. One off-nominal case per error / edge condition the code introduces.
-3. Any newly added env-var or config knob — pin its default with a test.
+- One test file per source module (`test_vocab.py` covers `vocab.py`).
+- Pure helpers tested directly. Async paths use `pytest.mark.asyncio`.
+- Mock at architectural seams only — `httpx.MockTransport`, the temp-DB `conn` fixture in `conftest.py`, `bench=` injection on `/status` readers. Never mock internal collaborators (private helpers, module-private state). Mocking internals couples tests to implementation.
+- One concept per test function. Names describe the behaviour, not the function-under-test.
+- `from __future__ import annotations` at the top of each test module.
 
-Don't over-write. A small focused test that would fail without the change is better than a sprawling one that exercises the whole module.
+Each test must carry an inline comment matching its line in the test plan from step 4:
+
+```python
+def test_import_skips_blank_rows(conn):  # AC5 — blank rows go to skipped_empty
+    ...
+
+def test_import_rejects_over_max_rows(conn):  # error: > 5000 rows → ValueError
+    ...
+```
+
+Assertions should diagnose, not just match — `assert summary.added == 3, f"expected 3 new, got {summary.added}"` is more useful than `assert summary.added == 3`. Boundary coverage from the spec's edge-case list is mandatory.
 
 ### 6. Run pytest
 
@@ -103,25 +152,24 @@ source .venv/bin/activate && python -m pytest -q
 
 #### Green → step 7.
 
-#### Red → self-check, then either fix-test or bounce-back.
+#### Red → self-check, then either fix-test or bounce back.
 
 A failing test means one of:
 
-- **Your test is wrong.** Re-read the diff. Does the code actually behave the way your test asserts? If not, your assertion was based on what you assumed the code *should* do, not what it does. Fix the test, re-run.
-- **The code is wrong.** If your test correctly mirrors the diff's behaviour and still fails (e.g. it raises, returns the wrong type, breaks an existing invariant), plan-exec produced buggy code. Bounce back:
+- **Your test is wrong.** Re-read the AC the test cites. Does your assertion actually restate the AC, or did you slip in an assumption? If the test does not faithfully encode the AC, fix the test, re-run.
+- **The code violates its own spec.** If the test correctly mirrors a numbered AC and still fails, the diff does not satisfy what plan-exec promised. Bounce back:
 
 ```bash
 gh issue comment <N> --body "$(cat <<'EOF'
 **Test-writer bounce-back**
 
-Stage 2 ran on branch \`<BRANCH>\` but pytest fails:
+Stage 2 ran on branch \`<BRANCH>\` but pytest fails. Each failing test traces back to a numbered AC in the latest behavioural spec.
 
 \`\`\`
 <paste the last 30 lines of pytest output>
 \`\`\`
 
-I re-read the diff and confirmed the test reflects what the code actually does.
-The code looks wrong. Returning to plan-exec.
+The diff does not satisfy its own spec. Returning to plan-exec.
 EOF
 )"
 
@@ -130,11 +178,29 @@ gh issue edit <N> \
   --add-label "state:needs-rework"
 ```
 
-Then **stop**. Do not push, do not commit failing tests. Your draft tests stay local; plan-exec will see them on the next cycle and decide whether to use them.
+Then **stop**. No push, no failing-test commit. Draft tests stay local.
 
-The bar for bouncing back: *would another reasonable agent reading only the diff write the same test and see it fail?*
+The bar for bouncing back: *the failing test cites a numbered AC, and a reasonable agent reading only the spec would write the same assertion.*
 
-### 7. Commit, push, open or update the PR
+### 7. Verify AC traceability
+
+Before pushing, confirm that every AC in the spec has at least one test, and every AC referenced in the new tests actually exists in the spec:
+
+```bash
+SPEC_ACS=$(printf '%s\n' "$SPEC" | grep -oE 'AC[0-9]+' | sort -u)
+TEST_ACS=$(git diff main...HEAD -- tests/ | grep -oE 'AC[0-9]+' | sort -u)
+
+if [[ "$SPEC_ACS" != "$TEST_ACS" ]]; then
+  echo "AC drift — spec vs tests:"
+  diff <(echo "$SPEC_ACS") <(echo "$TEST_ACS")
+  # missing-test (AC in spec, not in tests) → add the test
+  # phantom-AC  (AC in tests, not in spec) → remove citation or bounce back
+fi
+```
+
+If the diff is non-empty, do **not** push. Either add the missing test or remove the spurious citation. If you cannot reconcile (e.g. the test cites an AC the spec never had — meaning you imagined the AC), bounce back; that is a hallucination signal you should not silently launder.
+
+### 8. Commit, push, open or update the PR
 
 If you wrote new tests:
 
@@ -175,7 +241,7 @@ EOF
 
 If the diff was purely cosmetic and you wrote no new tests, still push and open/update the PR. Note it in the test plan: `- [n/a] No code paths changed; existing suite still green`.
 
-### 8. Flip the label
+### 9. Flip the label
 
 ```bash
 gh issue edit <N> \
@@ -183,12 +249,15 @@ gh issue edit <N> \
   --add-label "state:in-review"
 ```
 
-### 9. Exit
+### 10. Exit
 
 Print one line: `done: pushed <BRANCH> at <short-sha>, PR #<P> ready for review`.
 
 ## Hard rules
 
+- **Spec-driven, not diff-driven.** Tests come from the Behavioral spec block. The diff is for verifying signatures and detecting drift — never for inferring behaviour.
+- **No function bodies.** Read public signatures, read `tests/`, read project conventions. Anything else is forbidden — even if the spec is sparse, recover by bouncing back, not by peeking.
+- **Every test cites an AC** (or `# edge:` / `# error:`). No tag, no commit. AC drift between spec and tests is a push blocker.
 - **Never modify non-test files.** If the code is wrong, return to Stage 1.
 - **Never push red.** A failing test on the branch breaks Stage 3's re-run gate.
 - **One PR per issue.** If `gh pr list --search "Closes #<N>" --state open` returns a PR, push to its branch — never open a duplicate.

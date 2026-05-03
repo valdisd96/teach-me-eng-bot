@@ -1,7 +1,7 @@
 ---
 name: plan-exec
-description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh) or at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, post a `<!-- agent-plan v1 -->` comment summarizing intent, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
-version: 1.1.0
+description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh) or at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, post a `<!-- agent-plan v1 -->` comment that pairs intent with a behavioural spec, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
+version: 1.2.0
 ---
 
 # plan-exec
@@ -106,9 +106,12 @@ The issue should carry `type:*`, `priority:*`, and ideally `area:*`. Add what's 
 gh issue edit <N> --add-label "<comma,separated,labels>"
 ```
 
-### 6. Post the plan
+### 6. Post the plan + behavioural spec
 
-Before writing any code, post a single issue comment that captures *what you are about to do*. This is the only artefact of plan-exec's intent that survives — Stage 2 reads it for context, Stage 3 deliberately ignores it (the reviewer judges against the issue body and the diff, not your stated intent).
+Before writing any code, post a single issue comment with two halves:
+
+- **Plan** — your reasoning. Stage 2 reads it for orientation; Stage 3 deliberately ignores it.
+- **Behavioral spec** — the contract Stage 2 derives every test from. Test-writer is spec-driven and is forbidden from reading function bodies, so this section is its only input. A vague spec produces vague tests; an absent spec bounces the issue back to you.
 
 The comment **must** start with the marker line `<!-- agent-plan v1 -->`. The marker is what test-writer searches for and what review-pr filters out.
 
@@ -126,11 +129,36 @@ gh issue comment <N> --body "$(cat <<'EOF'
 - ...
 
 **Out of scope:** <anything explicit you are NOT doing this cycle, if relevant>
+
+## Behavioral spec
+
+**Public API** (signatures and types only — no bodies):
+- `module.func(arg: Type, ...) -> ReturnType` — one-line purpose
+- raises `ExceptionType` when ...
+
+**Acceptance criteria** (numbered; tests cite these IDs):
+- AC1: <given X, when Y, then Z>
+- AC2: <invariant — never observe state where ...>
+
+**Edge cases:**
+- empty / single / many / boundary (max, off-by-one)
+- null / missing / malformed input
+- unicode, whitespace, leading-trailing
+
+**Error conditions:**
+- <input> → <exception type / failure mode>
+
+**Examples** (input → output pairs):
+- f("") → ...
 EOF
 )"
 ```
 
-Keep it short — under ~25 lines. A plan that reads like a transcript is useless. On rework cycles post a *new* comment (do not edit prior ones); test-writer reads the latest, and the older plans stay as history.
+Length guide: Plan half ≤ 15 lines, Behavioral spec half ≤ 25 lines. A plan that reads like a transcript is useless; a spec that hand-waves is worse. Enumerate edge cases — empty / single / many / boundary / null / unicode — before writing a line of code, even if some end up not applying.
+
+**Cosmetic / refactor escape hatch.** When the diff genuinely changes no behaviour (docstring tweaks, comment fixes, whitespace, a no-op rename), replace the entire Behavioral spec block with the single line `**Behavioral spec:** none — cosmetic / refactor only.`. Test-writer treats that line as authoritative permission to skip test creation. Do not abuse this — if there is any new code path, the full spec is mandatory.
+
+On rework cycles post a *new* comment (do not edit prior ones); test-writer reads the latest, and the older plans stay as history.
 
 ### 7. Implement
 

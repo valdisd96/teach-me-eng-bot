@@ -34,14 +34,18 @@ A single-issue serial pipeline where three Claude agents — plan-exec, test-wri
 │                                  │                                  │
 │                                  ▼                                  │
 │  ┌───────────────────────────────────────────────────────────────┐ │
-│  │ STAGE 2 — test-writer  (FRESH session, no plan rationale)     │ │
+│  │ STAGE 2 — test-writer  (FRESH session, spec-driven)           │ │
 │  │ Skill: test-writer                                             │ │
-│  │ Context: PR diff (or branch diff if no PR yet) + tests/ dir   │ │
+│  │ Context: Behavioral spec block of the latest agent-plan       │ │
+│  │          comment + public signatures only (no function        │ │
+│  │          bodies) + tests/ dir                                  │ │
 │  │                                                                │ │
-│  │ Write tests covering the new code paths. Run pytest.          │ │
+│  │ Map each AC to a test, write tests citing AC IDs, run pytest, │ │
+│  │ verify AC traceability.                                        │ │
 │  │   pass → push branch, gh pr create with `Closes #N` body      │ │
 │  │          flip state:tests-pending → state:in-review           │ │
-│  │   fail → comment on issue with the failure                    │ │
+│  │   fail / spec missing →                                        │ │
+│  │          comment on issue with the failure                    │ │
 │  │          flip state:tests-pending → state:needs-rework        │ │
 │  └───────────────────────────────────────────────────────────────┘ │
 │                                  │                                  │
@@ -70,11 +74,16 @@ Three human gates only: **filing the issue**, **answering clarifications**, **un
 
 ### Plan comments (`<!-- agent-plan v1 -->`)
 
-Before implementing, plan-exec posts a single issue comment whose body starts with the marker line `<!-- agent-plan v1 -->`. The comment captures *what plan-exec intended to do this cycle* — goal, approach, files to touch, anything explicitly out of scope. Each cycle posts a fresh comment (rework cycles do not edit older ones), so the issue accumulates a chronological history of intent.
+Before implementing, plan-exec posts a single issue comment whose body starts with the marker line `<!-- agent-plan v1 -->`. The comment has two halves:
 
-Stage 2 (test-writer) reads the latest such comment for context — to understand what behaviours are being introduced and why this shape — but still treats the diff as the source of truth for what to test.
+- **Plan** — goal, approach, files to touch, out-of-scope. plan-exec's intent for this cycle, in prose.
+- **Behavioral spec** — public API signatures, numbered acceptance criteria (AC1, AC2, …), edge cases, error conditions, and input/output examples. The contract Stage 2 derives every test from.
 
-Stage 3 (reviewer) **deliberately filters these comments out**. Reviewing against the implementer's stated intent biases the verdict toward "did the agent do what it said it would" instead of "does the diff actually solve the issue." The reviewer judges only against the issue body, the human Q&A comments, and the diff itself.
+Each cycle posts a fresh comment (rework cycles do not edit older ones), so the issue accumulates a chronological history of intent and contract.
+
+Stage 2 (test-writer) reads only the **Behavioral spec** block. It is forbidden from reading function bodies — its job is to assert what the spec promises, not what the diff happens to do. Tests cite their source AC by ID (`# AC3`), and a traceability check before push refuses any spec/test drift. If the spec block is missing or vague, test-writer bounces the issue back rather than infer behaviour from the implementation. The cosmetic / refactor escape hatch (`**Behavioral spec:** none — cosmetic / refactor only.`) lets plan-exec authorize a no-test cycle when there is genuinely no behaviour delta.
+
+Stage 3 (reviewer) **deliberately filters these comments out**. Reviewing against the implementer's stated intent biases the verdict toward "did the agent do what it said it would" instead of "does the diff actually solve the issue." The reviewer judges only against the issue body, the human Q&A comments, and the full PR diff (including the spec-derived tests).
 
 ## State labels
 
