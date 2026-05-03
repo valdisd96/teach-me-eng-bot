@@ -57,6 +57,15 @@ case "$state_label" in
         ;;
 esac
 
+# type:epic guard — these belong to agent-epic-decompose.sh, not plan-exec.
+# Plan-exec on an epic would try to ship the whole feature as one PR, which
+# is exactly what `type:epic` exists to prevent.
+has_epic=$(echo "$issue_json" | jq -r '[.labels[].name] | any(. == "type:epic")')
+if [[ "$has_epic" == "true" ]]; then
+    echo "agent-plan-exec: issue #$ISSUE is labelled 'type:epic'; dispatch scripts/agent-epic-decompose.sh instead" >&2
+    exit 2
+fi
+
 # --- log paths ----------------------------------------------------------
 
 repo_root="$(git rev-parse --show-toplevel)"
