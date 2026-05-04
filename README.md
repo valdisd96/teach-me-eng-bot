@@ -1,64 +1,14 @@
 # teach-me-eng-bot
 
-A Telegram bot that **builds itself**.
+A Telegram bot that helps you learn English vocabulary.
 
-The bot is an English tutor: you save words with `/add`, it sends short tone-flavoured push messages that use those words, and ✅ / ❌ buttons update an FSRS spaced-repetition schedule per word. Plain messages stream a chat reply from an LLM with your vocab injected as soft hints.
-
-The interesting part is *how the code grows*. Every feature, fix, and refactor in this repo is shipped by an autonomous three-stage agent pipeline driven by GitHub issues. The human writes an issue; agents do the rest.
-
----
-
-## How it builds itself
-
-```
-user files an issue
-       │
-       ▼
-┌────────────────────────────────────────────────────────┐
-│ Stage 1 — plan-exec                                    │
-│   Reads issue + comments. Either asks a clarification  │
-│   question (state:clarification-needed → human gate),  │
-│   or cuts a branch, posts a plan + behavioural spec,   │
-│   implements, commits.                                 │
-│                       state:tests-pending              │
-└────────────────────────────────────────────────────────┘
-       │
-       ▼
-┌────────────────────────────────────────────────────────┐
-│ Stage 2 — test-writer  (FRESH session, spec-driven)    │
-│   Reads only the behavioural spec block + public       │
-│   signatures. Maps each acceptance criterion to a      │
-│   test, runs pytest, opens a PR with `Closes #N`.      │
-│                       state:in-review                  │
-└────────────────────────────────────────────────────────┘
-       │
-       ▼
-┌────────────────────────────────────────────────────────┐
-│ Stage 3 — review-pr  (FRESH session)                   │
-│   Re-runs pytest. Audits diff against safety checks    │
-│   (secrets, CI tampering, schema risk, scope drift).   │
-│   APPROVE → squash-merge & delete branch (issue        │
-│   auto-closes via Closes #N).                          │
-│   REJECT → request changes → state:needs-rework        │
-│   BLOCK  → state:blocked (human gate).                 │
-└────────────────────────────────────────────────────────┘
-```
-
-A polling orchestrator watches the `state:*` labels and dispatches the right agent on every tick. **Three human gates**: filing the issue, answering clarification comments, un-blocking parked issues. Everything else is automatic, including the merge.
-
-The full state machine, label set, safety checks, cycle-limit counter, and skill prompts: **[`workflow.md`](workflow.md)**.
-
-The orchestrator design space (polling vs webhooks, concurrency, selection, cycle counting): **[`orchestrator-plan.md`](orchestrator-plan.md)**.
-
-The skill prompts the agents run with live in **[`.claude/skills/`](.claude/skills/)** — one per stage, plus `dev-flow` and `clarify-issue` as cross-cutting helpers.
-
----
-
-## The bot itself (the worked example)
+You save words with `/add`. The bot sends short tone-flavoured push messages that use those words, and `✅ / ❌` buttons update an FSRS spaced-repetition schedule per word. Plain (non-slash) messages stream a chat reply from an LLM with your vocab injected as soft hints.
 
 A [python-telegram-bot](https://python-telegram-bot.org) app talking to any OpenAI-compatible chat-completions endpoint. Per-chat vocabulary, settings, and FSRS state live in SQLite (`data/vocab.db`); APScheduler sends randomised pushes inside each chat's active window.
 
-### Commands
+---
+
+## Commands
 
 | Command | Purpose |
 |---|---|
