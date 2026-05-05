@@ -1,3 +1,5 @@
+> **Status:** Superseded by [`agent-fabric/DESIGN.md`](https://github.com/valdisd96/agent-fabric/blob/main/DESIGN.md). Kept here for reference until `agent-fabric` Phase 1 ships, then will be removed.
+
 # Orchestrator Design Plan
 
 Detailed design space for the orchestrator daemon (Ticket 7). The orchestrator is the glue that turns the three manual stage scripts (`agent-plan-exec.sh`, `agent-test-write.sh`, `agent-review.sh`) into an autonomous pipeline driven by GitHub issue labels.
