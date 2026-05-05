@@ -4,12 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This repo is two layers stacked on top of each other:
-
-1. **An autonomous agent fabric** that ships code from a GitHub issue all the way to a merged PR with no human in the middle. Three Claude agents run in series — `plan-exec` → `test-writer` → `review-pr` — coordinated by a polling orchestrator that watches `state:*` issue labels. The user only files issues, answers clarification comments, and un-blocks parked issues. The orchestration layer is built out in a sibling repo, [`valdisd96/agent-fabric`](https://github.com/valdisd96/agent-fabric); see its `DESIGN.md` for the canonical architecture. See `workflow.md` for the state machine and `orchestrator-plan.md` (superseded — kept for reference) for the original dispatcher design.
-2. **A Telegram English-tutor bot** built *by* that fabric — the worked example. Users add vocabulary with `/add`; the bot sends FSRS-scheduled push messages that use those words in short tone-flavoured snippets, with ✅ knew / ❌ forgot buttons that update each word's FSRS state. Plain chat messages stream live replies from any OpenAI-compatible chat-completions endpoint with the chat's vocab injected as soft hints.
-
-When working in this repo: changes are routed through the agent pipeline (issues + the `dev-flow` skill), not direct commits to `main`. Treat the bot's modules as the artifact under maintenance and the `.claude/skills/`, `scripts/agent-*.sh`, and `workflow.md` files as the fabric maintaining it.
+A Telegram English-tutor bot. Users add vocabulary with `/add`; the bot sends FSRS-scheduled push messages that use those words in short tone-flavoured snippets, with ✅ knew / ❌ forgot buttons that update each word's FSRS state. Plain chat messages stream live replies from any OpenAI-compatible chat-completions endpoint with the chat's vocab injected as soft hints.
 
 ## Setup
 
@@ -33,10 +28,6 @@ source .venv/bin/activate && python -m pytest -q    # run tests
 ```
 
 The bot needs an OpenAI-compatible chat-completions endpoint reachable per `LLM_BACKEND`. Default backend is a local server on `http://127.0.0.1:8080`; production deployments use `LLM_BACKEND=openrouter`.
-
-## Issue-driven workflow
-
-GitHub issues are the unit of work. Each issue carries a `state:*` label that tracks where it sits in a three-stage pipeline (plan-exec → test-writer → reviewer), plus `type:*`, `priority:*`, and an optional `area:*`. An orchestrator daemon polls labels and dispatches the right agent. Auto-merge after reviewer approval — the user only intervenes to file issues, answer clarification comments, or un-block parked issues. Run `scripts/setup-labels.sh` once per repo to provision the label set. Full design (state machine, skills, orchestrator, safety checks): see `workflow.md`.
 
 ## Environment variables (`.env`)
 
@@ -119,3 +110,7 @@ Each factor lives in `[0, 1]`, lifted to `[1, 2]` so no single signal dominates.
 - `llm.py`: `LLAMA_URL`, `MODEL = "gemma4"` (model id sent to the local backend; OpenRouter uses `OPENROUTER_MODEL`).
 - `vocab.py`: `FSRS_RETENTION = 0.95`, `FSRS_MAX_DAYS = 7`, `RECENCY_TAU_DAYS = 7.0`.
 - `scheduler.py`: `MIN_GAP_MIN = 45` (minimum spacing between consecutive pushes, enforced implicitly by the bucket algorithm).
+
+## Agent fabric
+
+Day-to-day changes here are driven from issues by an external agent pipeline maintained in [`valdisd96/agent-fabric`](https://github.com/valdisd96/agent-fabric). The fabric owns the `state:*` label workflow, the `plan-exec` → `test-writer` → `review-pr` skills, and the cross-project orchestrator. The local `.claude/skills/` directory is rendered from there; see that repo's `DESIGN.md` for the architecture and `workflow.md` here for the state machine.
