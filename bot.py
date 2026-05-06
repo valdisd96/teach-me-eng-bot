@@ -725,8 +725,13 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     body = sched_module.format_explanation_reply(formatted, translation)
     transcript = explanation if not translation else f"{explanation}\n→ {translation}"
+    play_kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎮 Play game", callback_data="pg:start")]]
+    )
     try:
-        await query.message.reply_text(body, parse_mode="HTML", do_quote=True)
+        await query.message.reply_text(
+            body, parse_mode="HTML", reply_markup=play_kb, do_quote=True
+        )
         append_turn(chat_id, "explain", f"[{tag_word}] {transcript}")
     except Exception as e:  # noqa: BLE001
         log.error("failed to send explanation for chat %s: %s", chat_id, e)
@@ -812,6 +817,31 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     game = games_module.Game(chat_id=chat_id, rounds=rounds)
     games[chat_id] = game
     await _send_round(context.bot, chat_id, game)
+
+
+async def on_play_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Open the games direction-picker from the ❌-forgot explanation reply.
+
+    Mirrors `cmd_games`'s gates (in-progress, MIN_VOCAB) and posts the same
+    `gm:wt` / `gm:tw` menu, so existing handlers run the rounds.
+    """
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    if chat_id in games:
+        await query.message.reply_text(GAMES_IN_PROGRESS)
+        return
+    if len(_playable_rows(conn, chat_id)) < games_module.MIN_VOCAB:
+        await query.message.reply_text(GAMES_NEED_VOCAB)
+        return
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
+        InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
+    ]])
+    await query.message.reply_text("Pick a game:", reply_markup=kb)
 
 
 async def on_game_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1027,6 +1057,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
     app.add_handler(CallbackQueryHandler(on_add_vocab, pattern=r"^av:"))
     app.add_handler(CallbackQueryHandler(on_games_menu, pattern=r"^gm:"))
+    app.add_handler(CallbackQueryHandler(on_play_game, pattern=r"^pg:"))
     app.add_handler(CallbackQueryHandler(on_game_answer, pattern=r"^g:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
 
