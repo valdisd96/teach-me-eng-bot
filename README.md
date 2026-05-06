@@ -76,3 +76,9 @@ Per-chat scheduling (timezone, pushes/day, active window, tone, translate target
 ## Architecture
 
 Per-module breakdown lives in **[`CLAUDE.md`](CLAUDE.md)**. Code is split into `bot.py` (Telegram wiring) plus dedicated modules for `llm`, `vocab`, `prompts`, `config_flow`, `scheduler`, `translator`, `sysinfo`, and `db`.
+
+---
+
+## How this repo evolves itself
+
+Most changes here land through **[agent-fabric](https://github.com/valdisd96/agent-fabric)** — a small tool that drives Claude Code through a cyclical `plan-exec → test-writer → review-pr` pipeline against this repo's GitHub issues. A new issue gets triaged, planned, implemented on a branch, given tests in a fresh session, then reviewed and merged — each stage a separate Claude run with a tight contract. The skills under `.claude/skills/` are the project-side half of that contract; agent-fabric ships the rest. In practice: file an issue, label it, and the pipeline takes it from there.
