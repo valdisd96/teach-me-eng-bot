@@ -1,7 +1,9 @@
 """In-memory game scaffolding for vocab-driven mini-games.
 
-Today: Word → Translation (4-button quiz). Translation → Word will reuse
-``draw_rounds`` and the answer/result helpers. Game state is per-chat and
+Two directions, one engine: ``draw_rounds(direction="wt")`` builds a
+Word→Translation quiz, ``direction="tw"`` swaps the prompt and option
+columns to make a Translation→Word quiz. ``apply_answer`` and
+``format_result`` are direction-agnostic. Game state is per-chat and
 held only in process memory; a bot restart silently abandons in-flight
 games. No telegram imports — `bot.py` does the wiring.
 """
@@ -20,8 +22,8 @@ MAX_ROUNDS = 10
 @dataclass
 class Round:
     word_id: int
-    text: str
-    correct_translation: str
+    prompt: str
+    correct_answer: str
     options: list[str]
     correct_index: int
 
@@ -65,17 +67,28 @@ def _row_view(row) -> tuple[int, str, str] | None:
 def draw_rounds(
     rows: Iterable,
     *,
+    direction: str = "wt",
     n_max: int = MAX_ROUNDS,
     rng: random.Random | None = None,
 ) -> list[Round]:
     """Sample correct words and build per-round 4-option button sets.
 
-    Rows whose translation is None/empty are skipped. The resulting pool
-    must contain at least ``MIN_VOCAB`` rows or ``ValueError`` is raised.
-    Each round's three distractors are sampled without replacement from
-    the rest of the pool — so words used as the correct answer in earlier
-    rounds may legitimately reappear as distractors in later rounds.
+    ``direction="wt"`` builds Word→Translation rounds (prompt = English
+    text, options = translations). ``direction="tw"`` builds the mirror
+    Translation→Word (prompt = translation, options = English texts).
+
+    Rows whose translation is None/empty/whitespace are skipped (in either
+    direction — the translation is needed as the prompt for "tw" and as
+    the answer for "wt"). The surviving pool must contain at least
+    ``MIN_VOCAB`` rows or ``ValueError`` is raised. Each round's three
+    distractors are sampled without replacement from the rest of the
+    chosen pool — so words used as the correct answer in earlier rounds
+    may legitimately reappear as distractors later.
     """
+    if direction not in ("wt", "tw"):
+        raise ValueError(
+            f"unknown direction {direction!r}, expected 'wt' or 'tw'"
+        )
     rng = rng or random.Random()
     pool: list[tuple[int, str, str]] = []
     for r in rows:
@@ -88,13 +101,21 @@ def draw_rounds(
         )
     n_rounds = min(n_max, len(pool))
     chosen = rng.sample(pool, n_rounds)
+    # Column 1 = English text, column 2 = translation. The "answer" column
+    # is the side the user picks from buttons; the "prompt" column is the
+    # side displayed as the round question.
+    answer_col = 2 if direction == "wt" else 1
+    prompt_col = 1 if direction == "wt" else 2
     out: list[Round] = []
-    for i, (wid, text, translation) in enumerate(chosen):
-        candidates = [chosen[j][2] for j in range(len(chosen)) if j != i]
+    for i, row in enumerate(chosen):
+        wid = row[0]
+        prompt = row[prompt_col]
+        correct_answer = row[answer_col]
+        candidates = [chosen[j][answer_col] for j in range(len(chosen)) if j != i]
         distractors = rng.sample(candidates, N_OPTIONS - 1)
-        # Permute indices, not strings, so duplicate translation values
-        # (e.g. couch/sofa → диван) don't confuse correct_index lookup.
-        slots = [translation] + distractors
+        # Permute indices, not strings, so duplicate answer values
+        # (e.g. couch/sofa → диван in "wt") don't confuse correct_index.
+        slots = [correct_answer] + distractors
         order = list(range(len(slots)))
         rng.shuffle(order)
         options = [slots[k] for k in order]
@@ -102,8 +123,8 @@ def draw_rounds(
         out.append(
             Round(
                 word_id=wid,
-                text=text,
-                correct_translation=translation,
+                prompt=prompt,
+                correct_answer=correct_answer,
                 options=options,
                 correct_index=correct_index,
             )

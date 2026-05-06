@@ -32,7 +32,7 @@ def _translatable_pool(n: int) -> list[tuple[int, str, str]]:
 
 def _make_round(
     word_id: int = 1,
-    text: str = "cat",
+    prompt: str = "cat",
     correct: str = "кошка",
     options: list[str] | None = None,
     correct_index: int = 0,
@@ -41,8 +41,8 @@ def _make_round(
         options = [correct, "собака", "птица", "рыба"]
     return games.Round(
         word_id=word_id,
-        text=text,
-        correct_translation=correct,
+        prompt=prompt,
+        correct_answer=correct,
         options=options,
         correct_index=correct_index,
     )
@@ -182,18 +182,18 @@ def test_draw_rounds_correct_index_in_valid_range() -> None:  # AC4 — 0 ≤ co
 def test_draw_rounds_options_at_correct_index_matches_translation() -> None:  # AC4 — invariant
     rounds = games.draw_rounds(_translatable_pool(6), rng=random.Random(3))
     for r in rounds:
-        assert r.options[r.correct_index] == r.correct_translation, (
+        assert r.options[r.correct_index] == r.correct_answer, (
             f"options[{r.correct_index}]={r.options[r.correct_index]!r} "
-            f"!= correct_translation={r.correct_translation!r}"
+            f"!= correct_answer={r.correct_answer!r}"
         )
 
 
 def test_draw_rounds_distractors_drawn_from_other_round_words() -> None:  # AC4 — from chosen-pool minus self
     rounds = games.draw_rounds(_translatable_pool(8), rng=random.Random(4))
-    chosen_translations = {r.correct_translation for r in rounds}
+    chosen_translations = {r.correct_answer for r in rounds}
     for r in rounds:
         for opt in r.options:
-            if opt == r.correct_translation:
+            if opt == r.correct_answer:
                 continue
             assert opt in chosen_translations, (
                 f"distractor {opt!r} is not from the chosen-round pool {chosen_translations}"
@@ -290,7 +290,7 @@ def test_draw_rounds_accepts_sqlite_row(conn: sqlite3.Connection) -> None:  # pu
     rounds = games.draw_rounds(rows, rng=random.Random(11))
     assert len(rounds) == 5
     for r in rounds:
-        assert r.options[r.correct_index] == r.correct_translation
+        assert r.options[r.correct_index] == r.correct_answer
 
 
 def test_draw_rounds_sqlite_row_skips_none_translation(
@@ -326,10 +326,10 @@ def test_draw_rounds_duplicate_translations_dont_break_correct_index() -> None: 
     for seed in range(20):
         rounds = games.draw_rounds(rows, rng=random.Random(seed))
         for r in rounds:
-            assert r.options[r.correct_index] == r.correct_translation, (
+            assert r.options[r.correct_index] == r.correct_answer, (
                 f"seed={seed}, word_id={r.word_id}: "
                 f"options[{r.correct_index}]={r.options[r.correct_index]!r} "
-                f"!= correct={r.correct_translation!r}; options={r.options}"
+                f"!= correct={r.correct_answer!r}; options={r.options}"
             )
             assert len(r.options) == games.N_OPTIONS
 
@@ -348,7 +348,7 @@ def test_draw_rounds_default_rng_produces_valid_rounds() -> None:  # public API 
     assert len(rounds) == 6
     for r in rounds:
         assert len(r.options) == games.N_OPTIONS
-        assert r.options[r.correct_index] == r.correct_translation
+        assert r.options[r.correct_index] == r.correct_answer
 
 
 # -- Round / Game dataclass invariants (AC7) ---------------------------------
@@ -357,14 +357,14 @@ def test_draw_rounds_default_rng_produces_valid_rounds() -> None:  # public API 
 def test_round_dataclass_has_required_fields() -> None:  # AC7 — Round shape
     r = games.Round(
         word_id=1,
-        text="hello",
-        correct_translation="привет",
+        prompt="hello",
+        correct_answer="привет",
         options=["привет", "пока", "да", "нет"],
         correct_index=0,
     )
     assert r.word_id == 1
-    assert r.text == "hello"
-    assert r.correct_translation == "привет"
+    assert r.prompt == "hello"
+    assert r.correct_answer == "привет"
     assert r.options == ["привет", "пока", "да", "нет"]
     assert r.correct_index == 0
 
@@ -441,10 +441,6 @@ def test_bot_games_need_vocab_text() -> None:  # AC1 — refusal text constant
 
 def test_bot_games_in_progress_text() -> None:  # AC8 — already-in-progress text
     assert bot.GAMES_IN_PROGRESS == "you have a game in progress"
-
-
-def test_bot_games_tw_coming_soon_text() -> None:  # AC2 — Translation→Word "coming soon" reply
-    assert bot.GAMES_TW_COMING_SOON == "coming soon"
 
 
 def test_bot_commands_includes_games() -> None:  # AC1 — /games is a registered slash command
