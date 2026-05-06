@@ -43,6 +43,7 @@ from telegram.request import HTTPXRequest
 
 import config_flow
 import db as db_module
+import games as games_module
 import llm
 import prompts
 import scheduler as sched_module
@@ -121,6 +122,13 @@ pending_vocab: translator.PendingVocab = translator.PendingVocab()
 # Chats that recently issued /import: chat_id → expiry monotonic timestamp.
 # The next document upload from these chats is parsed as a vocab CSV.
 import_pending: dict[int, float] = {}
+# In-flight /games sessions: at most one per chat (AC8). Cleared on completion
+# and on bot restart — game state is intentionally not persisted.
+games: dict[int, games_module.Game] = {}
+
+GAMES_NEED_VOCAB = "add at least 4 words to your vocab first"
+GAMES_IN_PROGRESS = "you have a game in progress"
+GAMES_TW_COMING_SOON = "coming soon"
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -260,6 +268,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
+    ("games", "Play a vocab quiz (Word → Translation, 1–10 rounds)"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -605,6 +614,45 @@ async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+# --- /games -----------------------------------------------------------------
+
+
+def _playable_rows(conn_: sqlite3.Connection, chat_id: int) -> list[sqlite3.Row]:
+    return [r for r in vocab.list_words(conn_, chat_id) if r["translation"]]
+
+
+def _round_keyboard(game: games_module.Game) -> InlineKeyboardMarkup:
+    rd = game.current()
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(opt, callback_data=f"g:{game.current_round}:{i}")]
+        for i, opt in enumerate(rd.options)
+    ])
+
+
+async def _send_round(bot, chat_id: int, game: games_module.Game) -> None:
+    rd = game.current()
+    text = f"Round {game.current_round + 1}/{game.n_rounds}: {rd.text}"
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=_round_keyboard(game))
+
+
+async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    if chat_id in games:
+        await update.message.reply_text(GAMES_IN_PROGRESS)
+        return
+    if len(_playable_rows(conn, chat_id)) < games_module.MIN_VOCAB:
+        await update.message.reply_text(GAMES_NEED_VOCAB)
+        return
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
+        InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
+    ]])
+    await update.message.reply_text("Pick a game:", reply_markup=kb)
+
+
 # --- callback handlers ------------------------------------------------------
 
 
@@ -738,6 +786,81 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Already-rated button press — just acknowledge so the spinner clears.
     if update.callback_query:
         await update.callback_query.answer()
+
+
+async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    if query.data == "gm:tw":
+        await query.message.reply_text(GAMES_TW_COMING_SOON)
+        return
+    # gm:wt — start Word → Translation.
+    if chat_id in games:
+        await query.message.reply_text(GAMES_IN_PROGRESS)
+        return
+    rows = _playable_rows(conn, chat_id)
+    if len(rows) < games_module.MIN_VOCAB:
+        await query.message.reply_text(GAMES_NEED_VOCAB)
+        return
+    rounds = games_module.draw_rounds(rows, rng=random.Random())
+    game = games_module.Game(chat_id=chat_id, rounds=rounds)
+    games[chat_id] = game
+    await _send_round(context.bot, chat_id, game)
+
+
+async def on_game_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, round_idx_s, chosen_idx_s = query.data.split(":")
+        round_idx = int(round_idx_s)
+        chosen_idx = int(chosen_idx_s)
+    except (ValueError, AttributeError):
+        log.warning("Malformed game callback: %r", query.data)
+        return
+    chat_id = update.effective_chat.id
+    game = games.get(chat_id)
+    if game is None or game.done:
+        return  # stale tap after restart or post-completion
+    if round_idx != game.current_round:
+        return  # stale tap from an earlier round
+    rd = game.current()
+    correct = chosen_idx == rd.correct_index
+
+    feedback_rows = []
+    for i, opt in enumerate(rd.options):
+        if i == chosen_idx and correct:
+            label = f"✅ {opt}"
+        elif i == chosen_idx and not correct:
+            label = f"❌ {opt}"
+        elif not correct and i == rd.correct_index:
+            label = f"✅ {opt}"
+        else:
+            label = opt
+        feedback_rows.append([InlineKeyboardButton(label, callback_data="noop")])
+
+    games_module.apply_answer(game, chosen_idx)
+
+    try:
+        await query.edit_message_reply_markup(InlineKeyboardMarkup(feedback_rows))
+    except BadRequest:
+        pass  # message too old or already edited
+
+    if game.done:
+        await safe_send(
+            context.bot,
+            chat_id,
+            games_module.format_result(game.score, game.n_rounds),
+        )
+        games.pop(chat_id, None)
+    else:
+        await _send_round(context.bot, chat_id, game)
 
 
 # --- plain-text handler: config session OR just-talk ------------------------
@@ -896,10 +1019,13 @@ def main() -> None:
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
     app.add_handler(CommandHandler("translate", cmd_translate))
+    app.add_handler(CommandHandler("games", cmd_games))
 
     app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
     app.add_handler(CallbackQueryHandler(on_add_vocab, pattern=r"^av:"))
+    app.add_handler(CallbackQueryHandler(on_games_menu, pattern=r"^gm:"))
+    app.add_handler(CallbackQueryHandler(on_game_answer, pattern=r"^g:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
