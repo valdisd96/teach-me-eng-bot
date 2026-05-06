@@ -19,10 +19,12 @@ import csv
 import datetime
 import html
 import io
+import logging
 import math
 import random
 import re
 import sqlite3
+from typing import Callable
 
 from fsrs import Card, Rating, Scheduler, State
 
@@ -91,7 +93,10 @@ def add_word(conn: sqlite3.Connection, chat_id: int, text: str) -> bool:
 
 
 def add_words_bulk(
-    conn: sqlite3.Connection, chat_id: int, words: list[str]
+    conn: sqlite3.Connection,
+    chat_id: int,
+    words: list[str],
+    translations: list[str | None] | None = None,
 ) -> dict[str, int]:
     """Bulk-add words. Returns a count breakdown.
 
@@ -99,26 +104,94 @@ def add_words_bulk(
     Returns `{"added": N, "skipped": M, "invalid": K}` where `skipped` covers
     both pre-existing rows and within-input duplicates (both manifest as
     `INSERT OR IGNORE` no-ops).
+
+    `translations`, when given, is a parallel list aligned to `words`. Each new
+    row gets its translation; for skipped/invalid rows the translation slot is
+    discarded. When `translations` is None (default) every new row's
+    translation column is NULL — populated lazily by the startup backfill.
     """
+    if translations is not None and len(translations) != len(words):
+        raise ValueError(
+            f"translations length {len(translations)} does not match "
+            f"words length {len(words)}"
+        )
     ensure_chat(conn, chat_id)
     added = 0
     skipped = 0
     invalid = 0
     now = _now()
-    for raw in words:
+    for i, raw in enumerate(words):
         normalized = _normalize(raw)
         if not normalized:
             invalid += 1
             continue
+        translation = translations[i] if translations is not None else None
         cur = conn.execute(
-            "INSERT OR IGNORE INTO words(chat_id, text, added_at) VALUES (?, ?, ?)",
-            (chat_id, normalized, now),
+            "INSERT OR IGNORE INTO words(chat_id, text, added_at, translation) "
+            "VALUES (?, ?, ?, ?)",
+            (chat_id, normalized, now, translation),
         )
         if cur.rowcount > 0:
             added += 1
         else:
             skipped += 1
     return {"added": added, "skipped": skipped, "invalid": invalid}
+
+
+def set_translation(
+    conn: sqlite3.Connection, chat_id: int, text: str, translation: str
+) -> None:
+    """Update the translation column for `(chat_id, normalized(text))`.
+
+    No-ops when no row matches — callers don't need to know whether the row
+    still exists.
+    """
+    word = _normalize(text)
+    if not word:
+        return
+    conn.execute(
+        "UPDATE words SET translation = ? WHERE chat_id = ? AND text = ?",
+        (translation, chat_id, word),
+    )
+
+
+def backfill_translations(
+    conn: sqlite3.Connection,
+    *,
+    translate_fn: Callable[[str, str], str],
+    log: logging.Logger | None = None,
+) -> dict[str, int]:
+    """Translate every `words` row whose translation is still NULL.
+
+    Each row is translated using its chat's `translate_target` (joined from
+    `chats`). Per-row exceptions are caught, logged via `log.warning(...)` if
+    `log` is provided, counted under `failed`, and do not abort the sweep.
+    Returns `{"translated": N, "failed": M}`.
+    """
+    rows = conn.execute(
+        "SELECT w.id, w.text, c.translate_target "
+        "FROM words w JOIN chats c ON w.chat_id = c.chat_id "
+        "WHERE w.translation IS NULL"
+    ).fetchall()
+    translated = 0
+    failed = 0
+    for row in rows:
+        try:
+            result = translate_fn(row["text"], row["translate_target"])
+        except Exception as exc:  # noqa: BLE001 — keep the sweep alive
+            if log is not None:
+                log.warning(
+                    "backfill_translations: %r → %r failed: %s",
+                    row["text"], row["translate_target"], exc,
+                )
+            failed += 1
+            continue
+        conn.execute(
+            "UPDATE words SET translation = ? WHERE id = ?",
+            (result, row["id"]),
+        )
+        translated += 1
+    return {"translated": translated, "failed": failed}
 
 
 def parse_csv_words(text: str) -> list[str]:

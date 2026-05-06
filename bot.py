@@ -354,6 +354,20 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     normalized = text.strip().lower()
     if added:
+        # Eagerly translate so future games never need a network call.
+        # Failure here mustn't block the user-facing reply — backfill on next
+        # bot start will pick up any rows still NULL.
+        settings = config_flow.load_settings(conn, chat_id)
+        target = settings.target_lang if settings is not None else "ru"
+        try:
+            translation = await asyncio.to_thread(
+                translator.translate, normalized, target
+            )
+            vocab.set_translation(conn, chat_id, normalized, translation)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "cmd_add: translate %r → %r failed: %s", normalized, target, e
+            )
         await update.message.reply_text(f"➕ Added: {normalized}")
     else:
         await update.message.reply_text(f"Already in your vocab: {normalized}")
@@ -826,6 +840,19 @@ async def _post_init(application: Application) -> None:
     runner.start()
     runner.refresh_all()
     log.info("Scheduler started; refreshed jobs for all known chats.")
+    # One-shot translation backfill for rows added before the column existed
+    # (or whose previous translate attempt failed). Network-bound, so offload.
+    counts = await asyncio.to_thread(
+        vocab.backfill_translations,
+        conn,
+        translate_fn=translator.translate,
+        log=log,
+    )
+    if counts["translated"] or counts["failed"]:
+        log.info(
+            "Translation backfill: translated=%d failed=%d",
+            counts["translated"], counts["failed"],
+        )
     # Populate Telegram's native command menu so clients show autocomplete.
     await application.bot.set_my_commands(
         [BotCommand(name, desc) for name, desc in COMMANDS]

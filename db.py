@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS words (
     reps           INTEGER NOT NULL DEFAULT 0,
     lapses         INTEGER NOT NULL DEFAULT 0,
     last_review    TEXT,
+    translation    TEXT,
     UNIQUE(chat_id, text),
     FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
 );
@@ -86,3 +87,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE chats ADD COLUMN translate_target TEXT NOT NULL DEFAULT 'ru'"
         )
+    if "translation" not in _column_names(conn, "words"):
+        # NULL means "not yet translated" — backfilled by the startup sweep.
+        conn.execute("ALTER TABLE words ADD COLUMN translation TEXT")

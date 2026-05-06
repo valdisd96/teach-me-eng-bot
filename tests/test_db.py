@@ -83,3 +83,41 @@ def test_words_default_fsrs_state_is_new(conn: sqlite3.Connection) -> None:
     assert row["state"] == 0
     assert row["stability"] is None
     assert row["difficulty"] is None
+
+
+# --- words.translation column (issue #63) -----------------------------------
+
+
+def _word_columns(conn: sqlite3.Connection) -> dict[str, dict]:
+    rows = conn.execute("PRAGMA table_info(words)").fetchall()
+    return {r["name"]: {"type": r["type"], "notnull": r["notnull"]} for r in rows}
+
+
+def test_words_has_translation_column_after_init(conn: sqlite3.Connection) -> None:  # AC1 — translation column exists, TEXT, NULL allowed
+    cols = _word_columns(conn)
+    assert "translation" in cols, f"expected translation column, got {sorted(cols)}"
+    assert cols["translation"]["type"].upper() == "TEXT", (
+        f"expected TEXT, got {cols['translation']['type']!r}"
+    )
+    assert cols["translation"]["notnull"] == 0, "translation must allow NULL"
+
+
+def test_words_translation_default_is_null(conn: sqlite3.Connection) -> None:  # AC1 — fresh insert leaves translation NULL
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-04-21')"
+    )
+    conn.execute(
+        "INSERT INTO words(chat_id, text, added_at) VALUES (1, 'placid', '2026-04-21')"
+    )
+    row = conn.execute("SELECT translation FROM words").fetchone()
+    assert row["translation"] is None
+
+
+def test_init_db_translation_migration_idempotent(tmp_path: Path) -> None:  # AC1 — second init_db must not raise
+    path = tmp_path / "vocab.db"
+    c = db_mod.connect(path)
+    db_mod.init_db(c)
+    db_mod.init_db(c)
+    cols = _word_columns(c)
+    assert "translation" in cols
+    c.close()
