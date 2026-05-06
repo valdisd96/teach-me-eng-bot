@@ -453,3 +453,298 @@ def test_bot_exposes_games_in_flight_dict() -> None:  # AC6 + AC8 — module-lev
     assert isinstance(bot.games, dict), (
         f"bot.games must be a dict, got {type(bot.games).__name__}"
     )
+
+
+# ===========================================================================
+# Issue #66 — Translation→Word direction (mirror of Word→Translation)
+# AC IDs in this section refer to the issue-#66 Behavioral spec, not #65.
+# ===========================================================================
+
+
+# -- direction="wt" semantics (AC2) ------------------------------------------
+
+
+def test_draw_rounds_wt_default_direction_explicit() -> None:  # AC2 — default == explicit "wt"
+    pool = _translatable_pool(6)
+    a = games.draw_rounds(pool, rng=random.Random(42))
+    b = games.draw_rounds(pool, direction="wt", rng=random.Random(42))
+    assert [r.word_id for r in a] == [r.word_id for r in b]
+    assert [r.options for r in a] == [r.options for r in b]
+    assert [r.correct_index for r in a] == [r.correct_index for r in b]
+    assert [r.prompt for r in a] == [r.prompt for r in b]
+    assert [r.correct_answer for r in a] == [r.correct_answer for r in b]
+
+
+def test_draw_rounds_wt_prompt_is_english_text() -> None:  # AC2 — wt prompt = English word
+    rows = [
+        (1, "cat", "кошка"),
+        (2, "dog", "собака"),
+        (3, "bird", "птица"),
+        (4, "fish", "рыба"),
+    ]
+    english = {r[1] for r in rows}
+    rounds = games.draw_rounds(rows, direction="wt", rng=random.Random(0))
+    for r in rounds:
+        assert r.prompt in english, (
+            f"wt prompt should be an English text from the pool, got {r.prompt!r}"
+        )
+
+
+def test_draw_rounds_wt_options_are_translations() -> None:  # AC2 — wt options drawn from translations
+    rows = [
+        (1, "cat", "кошка"),
+        (2, "dog", "собака"),
+        (3, "bird", "птица"),
+        (4, "fish", "рыба"),
+    ]
+    translations = {r[2] for r in rows}
+    rounds = games.draw_rounds(rows, direction="wt", rng=random.Random(0))
+    for r in rounds:
+        for opt in r.options:
+            assert opt in translations, (
+                f"wt option {opt!r} should be a translation from the pool {translations}"
+            )
+
+
+def test_draw_rounds_wt_correct_answer_is_translation() -> None:  # AC2 — wt correct_answer = row.translation
+    rows = [
+        (1, "cat", "кошка"),
+        (2, "dog", "собака"),
+        (3, "bird", "птица"),
+        (4, "fish", "рыба"),
+    ]
+    by_id = {wid: trans for wid, _en, trans in rows}
+    rounds = games.draw_rounds(rows, direction="wt", rng=random.Random(0))
+    for r in rounds:
+        assert r.correct_answer == by_id[r.word_id], (
+            f"wt round word_id={r.word_id}: correct_answer={r.correct_answer!r} "
+            f"should equal that row's translation {by_id[r.word_id]!r}"
+        )
+
+
+# -- direction="tw" semantics (AC1) ------------------------------------------
+
+
+def test_draw_rounds_tw_prompt_is_translation() -> None:  # AC1 — tw prompt = row's translation
+    rows = [
+        (1, "cat", "кошка"),
+        (2, "dog", "собака"),
+        (3, "bird", "птица"),
+        (4, "fish", "рыба"),
+    ]
+    by_id = {wid: trans for wid, _en, trans in rows}
+    rounds = games.draw_rounds(rows, direction="tw", rng=random.Random(0))
+    for r in rounds:
+        assert r.prompt == by_id[r.word_id], (
+            f"tw round word_id={r.word_id}: prompt={r.prompt!r} "
+            f"should equal that row's translation {by_id[r.word_id]!r}"
+        )
+
+
+def test_draw_rounds_tw_correct_answer_is_english_text() -> None:  # AC1 — tw correct_answer = English word
+    rows = [
+        (1, "cat", "кошка"),
+        (2, "dog", "собака"),
+        (3, "bird", "птица"),
+        (4, "fish", "рыба"),
+    ]
+    by_id = {wid: en for wid, en, _t in rows}
+    rounds = games.draw_rounds(rows, direction="tw", rng=random.Random(0))
+    for r in rounds:
+        assert r.correct_answer == by_id[r.word_id], (
+            f"tw round word_id={r.word_id}: correct_answer={r.correct_answer!r} "
+            f"should equal that row's English text {by_id[r.word_id]!r}"
+        )
+        assert r.options[r.correct_index] == by_id[r.word_id], (
+            f"tw round word_id={r.word_id}: options[{r.correct_index}]="
+            f"{r.options[r.correct_index]!r} should equal English text {by_id[r.word_id]!r}"
+        )
+
+
+def test_draw_rounds_tw_options_are_english_texts_from_chosen_pool() -> None:  # AC1 — distractors from chosen English words
+    rows = [(i, f"word{i}", f"trans{i}") for i in range(1, 9)]
+    rounds = games.draw_rounds(rows, direction="tw", rng=random.Random(7))
+    chosen_english = {r.correct_answer for r in rounds}
+    for r in rounds:
+        for opt in r.options:
+            if opt == r.correct_answer:
+                continue
+            assert opt in chosen_english, (
+                f"tw distractor {opt!r} not from the chosen-pool English words "
+                f"{chosen_english}"
+            )
+
+
+def test_draw_rounds_tw_distractors_unique_within_round() -> None:  # AC1 — without-replacement
+    # Unique English texts across the pool → all 4 options distinct strings.
+    rows = [(i, f"word{i}", f"trans{i}") for i in range(1, 9)]
+    rounds = games.draw_rounds(rows, direction="tw", rng=random.Random(8))
+    for r in rounds:
+        assert len(set(r.options)) == games.N_OPTIONS, (
+            f"tw options must be distinct (unique English pool); got {r.options}"
+        )
+
+
+# -- AC3 invariants in "tw" direction ----------------------------------------
+
+
+def test_draw_rounds_tw_round_invariant_holds() -> None:  # AC3 — options[correct_index] == correct_answer
+    rounds = games.draw_rounds(
+        _translatable_pool(6), direction="tw", rng=random.Random(3)
+    )
+    for r in rounds:
+        assert r.options[r.correct_index] == r.correct_answer, (
+            f"tw word_id={r.word_id}: options[{r.correct_index}]="
+            f"{r.options[r.correct_index]!r} != correct_answer={r.correct_answer!r}"
+        )
+
+
+def test_draw_rounds_tw_correct_index_in_range_and_n_options() -> None:  # AC3 — shape in tw
+    rounds = games.draw_rounds(
+        _translatable_pool(6), direction="tw", rng=random.Random(4)
+    )
+    for r in rounds:
+        assert len(r.options) == games.N_OPTIONS, (
+            f"tw expected {games.N_OPTIONS} options, got {len(r.options)}"
+        )
+        assert 0 <= r.correct_index < games.N_OPTIONS, (
+            f"tw correct_index {r.correct_index} out of range [0, {games.N_OPTIONS})"
+        )
+
+
+def test_draw_rounds_tw_invariant_holds_across_many_seeds() -> None:  # edge: tw invariant deterministic across seeds
+    rows = _translatable_pool(8)
+    for seed in range(25):
+        rounds = games.draw_rounds(rows, direction="tw", rng=random.Random(seed))
+        for r in rounds:
+            assert r.options[r.correct_index] == r.correct_answer, (
+                f"seed={seed}, word_id={r.word_id}: invariant failed; "
+                f"options={r.options}, correct_index={r.correct_index}, "
+                f"correct_answer={r.correct_answer!r}"
+            )
+            assert len(r.options) == games.N_OPTIONS
+            assert 0 <= r.correct_index < games.N_OPTIONS
+
+
+def test_draw_rounds_tw_uses_provided_rng_deterministically() -> None:  # AC1 — same seed → same tw sequence
+    pool = _translatable_pool(8)
+    a = games.draw_rounds(pool, direction="tw", rng=random.Random(123))
+    b = games.draw_rounds(pool, direction="tw", rng=random.Random(123))
+    assert [r.word_id for r in a] == [r.word_id for r in b]
+    assert [r.options for r in a] == [r.options for r in b]
+    assert [r.correct_index for r in a] == [r.correct_index for r in b]
+    assert [r.prompt for r in a] == [r.prompt for r in b]
+    assert [r.correct_answer for r in a] == [r.correct_answer for r in b]
+
+
+# -- AC4 — invalid direction / keyword-only ----------------------------------
+
+
+def test_draw_rounds_unknown_direction_raises_value_error() -> None:  # AC4 / error: direction="xx" → ValueError
+    with pytest.raises(ValueError):
+        games.draw_rounds(
+            _translatable_pool(5), direction="xx", rng=random.Random(0)
+        )
+
+
+def test_draw_rounds_empty_string_direction_raises() -> None:  # AC4 — empty direction → ValueError
+    with pytest.raises(ValueError):
+        games.draw_rounds(
+            _translatable_pool(5), direction="", rng=random.Random(0)
+        )
+
+
+def test_draw_rounds_direction_is_keyword_only() -> None:  # AC4 — direction must be a kwarg
+    with pytest.raises(TypeError):
+        # Passing direction positionally must fail because the signature has it
+        # after the bare `*` separator.
+        games.draw_rounds(_translatable_pool(5), "tw", rng=random.Random(0))  # type: ignore[misc]
+
+
+# -- edge: filtering still applies in "tw" direction -------------------------
+
+
+def test_draw_rounds_tw_skips_none_translation() -> None:  # edge: None translation excluded in tw
+    rows = _translatable_pool(4) + [(99, "ghost", None)]
+    rounds = games.draw_rounds(rows, direction="tw", rng=random.Random(7))
+    assert 99 not in {r.word_id for r in rounds}, (
+        "tw: row with None translation must be filtered out (translation is the prompt)"
+    )
+    assert len(rounds) == 4
+
+
+def test_draw_rounds_tw_skips_whitespace_translation() -> None:  # edge: whitespace translation excluded in tw
+    rows = _translatable_pool(4) + [(99, "ghost", "   ")]
+    rounds = games.draw_rounds(rows, direction="tw", rng=random.Random(8))
+    assert 99 not in {r.word_id for r in rounds}, (
+        "tw: row with whitespace-only translation must be filtered out"
+    )
+
+
+# -- error: pool < MIN_VOCAB after filter, in "tw" direction -----------------
+
+
+def test_draw_rounds_tw_too_few_translatable_raises() -> None:  # error: tw pool < MIN_VOCAB → ValueError
+    with pytest.raises(ValueError):
+        games.draw_rounds(
+            _translatable_pool(3), direction="tw", rng=random.Random(0)
+        )
+
+
+def test_draw_rounds_tw_filter_then_too_few_raises() -> None:  # error: tw post-filter pool < MIN_VOCAB
+    rows = [
+        (1, "a", "tr1"),
+        (2, "b", "tr2"),
+        (3, "c", None),
+        (4, "d", "   "),
+        (5, "e", ""),
+    ]
+    with pytest.raises(ValueError):
+        games.draw_rounds(rows, direction="tw", rng=random.Random(0))
+
+
+# -- edge: Round dataclass rejects old field names ---------------------------
+
+
+def test_round_rejects_old_text_kwarg() -> None:  # edge: Round(text=…) → TypeError
+    with pytest.raises(TypeError):
+        games.Round(  # type: ignore[call-arg]
+            word_id=1,
+            text="cat",
+            correct_answer="кошка",
+            options=["кошка", "собака", "птица", "рыба"],
+            correct_index=0,
+        )
+
+
+def test_round_rejects_old_correct_translation_kwarg() -> None:  # edge: Round(correct_translation=…) → TypeError
+    with pytest.raises(TypeError):
+        games.Round(  # type: ignore[call-arg]
+            word_id=1,
+            prompt="cat",
+            correct_translation="кошка",
+            options=["кошка", "собака", "птица", "рыба"],
+            correct_index=0,
+        )
+
+
+# -- AC5 / AC6 — bot wiring --------------------------------------------------
+
+
+def test_bot_games_tw_coming_soon_removed() -> None:  # AC5 — constant must be gone
+    assert not hasattr(bot, "GAMES_TW_COMING_SOON"), (
+        "bot.GAMES_TW_COMING_SOON must be removed once tw is a real game"
+    )
+
+
+def test_bot_commands_games_description_mentions_both_directions() -> None:  # AC6 — COMMANDS describes both
+    games_desc = next((d for n, d in bot.COMMANDS if n == "games"), None)
+    assert games_desc is not None, "COMMANDS must contain a 'games' entry"
+    desc_l = games_desc.lower()
+    mentions_wt = ("word → translation" in desc_l) or ("word->translation" in desc_l)
+    mentions_tw = ("translation → word" in desc_l) or ("translation->word" in desc_l)
+    mentions_quiz = "quiz" in desc_l
+    assert (mentions_wt and mentions_tw) or mentions_quiz, (
+        "COMMANDS 'games' description should mention both Word→Translation and "
+        f"Translation→Word, or generalise (e.g. 'vocab quiz'); got {games_desc!r}"
+    )
