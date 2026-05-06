@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 import pytest
@@ -14,6 +15,23 @@ CHAT = 100
 
 def _all_words(conn: sqlite3.Connection) -> list[str]:
     return [r["text"] for r in conn.execute("SELECT text FROM words").fetchall()]
+
+
+def _set_chat_target(conn: sqlite3.Connection, chat_id: int, target: str) -> None:
+    vocab.ensure_chat(conn, chat_id)
+    conn.execute(
+        "UPDATE chats SET translate_target = ? WHERE chat_id = ?", (target, chat_id)
+    )
+
+
+def _translation_for(
+    conn: sqlite3.Connection, chat_id: int, text: str
+) -> str | None:
+    row = conn.execute(
+        "SELECT translation FROM words WHERE chat_id = ? AND text = ?",
+        (chat_id, text),
+    ).fetchone()
+    return None if row is None else row["translation"]
 
 
 def test_count_words_is_per_chat(conn: sqlite3.Connection) -> None:
@@ -320,3 +338,229 @@ def test_csv_round_trip_preserves_words() -> None:
     words = ["apple", "banana split", "cherry"]
     serialized = vocab.format_csv(words)
     assert sorted(vocab.parse_csv_words(serialized)) == sorted(words)
+
+
+# --- set_translation (issue #63) -------------------------------------------
+
+
+def test_set_translation_writes_for_existing_row(conn: sqlite3.Connection) -> None:  # AC3 — persist for matching row
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.set_translation(conn, CHAT, "apple", "яблоко")
+    assert _translation_for(conn, CHAT, "apple") == "яблоко"
+
+
+def test_set_translation_normalizes_text_for_lookup(conn: sqlite3.Connection) -> None:  # AC3 — _normalize gates the WHERE
+    vocab.add_word(conn, CHAT, "apple")
+    # Pre-norm whitespace + casing must still target the same row.
+    vocab.set_translation(conn, CHAT, "  APPLE  ", "яблоко")
+    assert _translation_for(conn, CHAT, "apple") == "яблоко"
+
+
+def test_set_translation_noop_when_row_missing(conn: sqlite3.Connection) -> None:  # AC3 — never raises for missing row
+    # No add_word call: there is no matching row in this chat.
+    vocab.ensure_chat(conn, CHAT)
+    vocab.set_translation(conn, CHAT, "ghost", "призрак")  # must not raise
+    row = conn.execute(
+        "SELECT 1 FROM words WHERE chat_id = ? AND text = 'ghost'", (CHAT,)
+    ).fetchone()
+    assert row is None, "set_translation must not insert"
+
+
+def test_set_translation_does_not_disturb_other_chats(conn: sqlite3.Connection) -> None:  # AC3 — chat_id scopes the UPDATE
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.add_word(conn, CHAT + 1, "apple")
+    vocab.set_translation(conn, CHAT, "apple", "яблоко")
+    assert _translation_for(conn, CHAT, "apple") == "яблоко"
+    assert _translation_for(conn, CHAT + 1, "apple") is None, (
+        "translation must scope to chat_id"
+    )
+
+
+# --- backfill_translations (issue #63) -------------------------------------
+
+
+def test_backfill_translates_only_null_rows(conn: sqlite3.Connection) -> None:  # AC2 — NULL rows get translated
+    _set_chat_target(conn, CHAT, "ru")
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.add_word(conn, CHAT, "banana")
+
+    counts = vocab.backfill_translations(
+        conn, translate_fn=lambda text, target: f"{text}->{target}"
+    )
+
+    assert counts == {"translated": 2, "failed": 0}
+    assert _translation_for(conn, CHAT, "apple") == "apple->ru"
+    assert _translation_for(conn, CHAT, "banana") == "banana->ru"
+
+
+def test_backfill_leaves_non_null_rows_untouched(conn: sqlite3.Connection) -> None:  # AC2 — pre-translated rows are skipped
+    _set_chat_target(conn, CHAT, "ru")
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.set_translation(conn, CHAT, "apple", "preset")
+    vocab.add_word(conn, CHAT, "banana")  # NULL
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_translate(text: str, target: str) -> str:
+        seen.append((text, target))
+        return f"{text}!"
+
+    counts = vocab.backfill_translations(conn, translate_fn=fake_translate)
+
+    assert counts == {"translated": 1, "failed": 0}, f"got {counts}"
+    assert seen == [("banana", "ru")], (
+        f"translate_fn must only be called for NULL rows; got {seen}"
+    )
+    assert _translation_for(conn, CHAT, "apple") == "preset"
+    assert _translation_for(conn, CHAT, "banana") == "banana!"
+
+
+def test_backfill_uses_per_chat_translate_target(conn: sqlite3.Connection) -> None:  # AC2 — edge: multiple chats different targets
+    _set_chat_target(conn, CHAT, "ru")
+    _set_chat_target(conn, CHAT + 1, "es")
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.add_word(conn, CHAT + 1, "apple")
+
+    counts = vocab.backfill_translations(
+        conn, translate_fn=lambda text, target: f"{text}-{target}"
+    )
+
+    assert counts == {"translated": 2, "failed": 0}
+    assert _translation_for(conn, CHAT, "apple") == "apple-ru"
+    assert _translation_for(conn, CHAT + 1, "apple") == "apple-es"
+
+
+def test_backfill_swallows_per_row_exception(conn: sqlite3.Connection) -> None:  # AC2 — per-row failure leaves row NULL, sweep continues
+    _set_chat_target(conn, CHAT, "ru")
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.add_word(conn, CHAT, "banana")
+    vocab.add_word(conn, CHAT, "cherry")
+
+    def flaky(text: str, target: str) -> str:
+        if text == "banana":
+            raise RuntimeError("boom")
+        return f"{text}-{target}"
+
+    counts = vocab.backfill_translations(conn, translate_fn=flaky)
+
+    assert counts == {"translated": 2, "failed": 1}, f"got {counts}"
+    assert _translation_for(conn, CHAT, "apple") == "apple-ru"
+    assert _translation_for(conn, CHAT, "banana") is None, (
+        "failed row must remain NULL"
+    )
+    assert _translation_for(conn, CHAT, "cherry") == "cherry-ru"
+
+
+def test_backfill_logs_warning_when_logger_provided(
+    conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:  # AC2 — error path: log.warning emitted for failures
+    _set_chat_target(conn, CHAT, "ru")
+    vocab.add_word(conn, CHAT, "apple")
+
+    log = logging.getLogger("test_backfill_warns")
+
+    def boom(text: str, target: str) -> str:
+        raise RuntimeError("nope")
+
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        counts = vocab.backfill_translations(conn, translate_fn=boom, log=log)
+
+    assert counts == {"translated": 0, "failed": 1}
+    assert any(
+        rec.levelno == logging.WARNING for rec in caplog.records
+    ), f"expected a WARNING record, got {[r.levelname for r in caplog.records]}"
+
+
+def test_backfill_no_logger_swallows_exception_silently(
+    conn: sqlite3.Connection,
+) -> None:  # AC2 — log=None must be safe
+    _set_chat_target(conn, CHAT, "ru")
+    vocab.add_word(conn, CHAT, "apple")
+
+    counts = vocab.backfill_translations(
+        conn,
+        translate_fn=lambda t, target: (_ for _ in ()).throw(RuntimeError("x")),
+    )
+
+    assert counts == {"translated": 0, "failed": 1}
+
+
+def test_backfill_returns_zero_for_empty_words(conn: sqlite3.Connection) -> None:  # edge: empty words table
+    counts = vocab.backfill_translations(
+        conn, translate_fn=lambda text, target: "should-not-be-called"
+    )
+    assert counts == {"translated": 0, "failed": 0}
+
+
+def test_backfill_no_op_when_all_translated(conn: sqlite3.Connection) -> None:  # edge: every row already populated
+    _set_chat_target(conn, CHAT, "ru")
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.set_translation(conn, CHAT, "apple", "preset")
+
+    calls: list[tuple[str, str]] = []
+
+    counts = vocab.backfill_translations(
+        conn,
+        translate_fn=lambda text, target: calls.append((text, target)) or "x",
+    )
+
+    assert counts == {"translated": 0, "failed": 0}
+    assert calls == [], f"translate_fn must not be called; got {calls}"
+    assert _translation_for(conn, CHAT, "apple") == "preset"
+
+
+# --- add_words_bulk translations parameter (issue #63) ---------------------
+
+
+def test_add_words_bulk_default_translations_are_null(
+    conn: sqlite3.Connection,
+) -> None:  # AC4 — translations=None leaves all NULL (existing call sites)
+    counts = vocab.add_words_bulk(conn, CHAT, ["apple", "banana"])
+    assert counts == {"added": 2, "skipped": 0, "invalid": 0}
+    assert _translation_for(conn, CHAT, "apple") is None
+    assert _translation_for(conn, CHAT, "banana") is None
+
+
+def test_add_words_bulk_with_translations_stores_each(
+    conn: sqlite3.Connection,
+) -> None:  # AC4 — parallel translations attach to new rows
+    counts = vocab.add_words_bulk(
+        conn,
+        CHAT,
+        ["apple", "banana"],
+        translations=["яблоко", "банан"],
+    )
+    assert counts == {"added": 2, "skipped": 0, "invalid": 0}
+    assert _translation_for(conn, CHAT, "apple") == "яблоко"
+    assert _translation_for(conn, CHAT, "banana") == "банан"
+
+
+def test_add_words_bulk_translations_length_mismatch_raises(
+    conn: sqlite3.Connection,
+) -> None:  # AC4 — error: ValueError on len mismatch
+    with pytest.raises(ValueError):
+        vocab.add_words_bulk(
+            conn, CHAT, ["apple", "banana"], translations=["only-one"]
+        )
+
+
+def test_add_words_bulk_drops_translation_for_within_batch_dup(
+    conn: sqlite3.Connection,
+) -> None:  # AC4 — edge: in-batch duplicate's translation is discarded
+    counts = vocab.add_words_bulk(
+        conn,
+        CHAT,
+        ["apple", "apple", "banana"],
+        translations=["t1", "t2", "t3"],
+    )
+    assert counts == {"added": 2, "skipped": 1, "invalid": 0}, f"got {counts}"
+    # First "apple" wins; "t2" must not overwrite "t1".
+    assert _translation_for(conn, CHAT, "apple") == "t1"
+    assert _translation_for(conn, CHAT, "banana") == "t3"
+
+
+def test_add_words_bulk_empty_with_empty_translations(
+    conn: sqlite3.Connection,
+) -> None:  # AC4 — edge: empty input + empty translations
+    counts = vocab.add_words_bulk(conn, CHAT, [], translations=[])
+    assert counts == {"added": 0, "skipped": 0, "invalid": 0}
