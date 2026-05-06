@@ -128,7 +128,6 @@ games: dict[int, games_module.Game] = {}
 
 GAMES_NEED_VOCAB = "add at least 4 words to your vocab first"
 GAMES_IN_PROGRESS = "you have a game in progress"
-GAMES_TW_COMING_SOON = "coming soon"
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -268,7 +267,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Play a vocab quiz (Word → Translation, 1–10 rounds)"),
+    ("games", "Play a vocab quiz (Word → Translation or Translation → Word, 1–10 rounds)"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -631,7 +630,7 @@ def _round_keyboard(game: games_module.Game) -> InlineKeyboardMarkup:
 
 async def _send_round(bot, chat_id: int, game: games_module.Game) -> None:
     rd = game.current()
-    text = f"Round {game.current_round + 1}/{game.n_rounds}: {rd.text}"
+    text = f"Round {game.current_round + 1}/{game.n_rounds}: {rd.prompt}"
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=_round_keyboard(game))
 
 
@@ -795,10 +794,13 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    if query.data == "gm:tw":
-        await query.message.reply_text(GAMES_TW_COMING_SOON)
+    if query.data == "gm:wt":
+        direction = "wt"
+    elif query.data == "gm:tw":
+        direction = "tw"
+    else:
+        log.warning("Malformed gm callback: %r", query.data)
         return
-    # gm:wt — start Word → Translation.
     if chat_id in games:
         await query.message.reply_text(GAMES_IN_PROGRESS)
         return
@@ -806,7 +808,7 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if len(rows) < games_module.MIN_VOCAB:
         await query.message.reply_text(GAMES_NEED_VOCAB)
         return
-    rounds = games_module.draw_rounds(rows, rng=random.Random())
+    rounds = games_module.draw_rounds(rows, direction=direction, rng=random.Random())
     game = games_module.Game(chat_id=chat_id, rounds=rounds)
     games[chat_id] = game
     await _send_round(context.bot, chat_id, game)
