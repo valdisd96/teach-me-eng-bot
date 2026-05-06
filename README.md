@@ -22,6 +22,7 @@ A [python-telegram-bot](https://python-telegram-bot.org) app talking to any Open
 | `/export` | Sends the chat's vocab back as `vocab-YYYY-MM-DD.csv`, alphabetical, with a `text` header. FSRS state not exported. |
 | `/resetvocab` | Wipe vocabulary (with a confirm button). |
 | `/translate <text>` | Google-translates args (or replied message) into the chat's target language. Reverse-translates non-Latin input back to English. Inline `➕ Add to vocab` button on results ≤5 words. Bypasses the LLM. |
+| `/games` | Pick a vocab quiz from a 2-button menu: **Word → Translation** or **Translation → Word**. Either runs `min(10, vocab_size)` rounds with 4 inline buttons each (1 correct + 3 distractors); a tap edits the keyboard with ✅/❌ feedback and advances. Final message: `🎯 You scored X/N`. One game per chat at a time; in-memory only (a restart abandons in-flight games). Needs at least 4 translatable vocab rows. |
 | `/status` | Host diagnostics, vocab count, LLM endpoint health, short bench. |
 
 Plain (non-slash) messages hit the LLM with vocab injected into the system prompt as soft hints. Words that appear literally in the reply bump their `mention_count` and get freshness credit.
@@ -75,7 +76,7 @@ Per-chat scheduling (timezone, pushes/day, active window, tone, translate target
 
 ## Architecture
 
-Per-module breakdown lives in **[`CLAUDE.md`](CLAUDE.md)**. Code is split into `bot.py` (Telegram wiring) plus dedicated modules for `llm`, `vocab`, `prompts`, `config_flow`, `scheduler`, `translator`, `sysinfo`, and `db`.
+Per-module breakdown lives in **[`CLAUDE.md`](CLAUDE.md)**. Code is split into `bot.py` (Telegram wiring) plus dedicated modules for `llm`, `vocab`, `prompts`, `config_flow`, `scheduler`, `translator`, `sysinfo`, `games`, and `db`.
 
 ---
 
