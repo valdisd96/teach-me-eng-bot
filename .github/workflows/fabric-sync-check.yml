@@ -1,0 +1,47 @@
+# Drift check for fabric-managed skills.
+#
+# Generated from agent-fabric's example at
+# `examples/github-actions/fabric-sync-check.yml`. Pinned to a specific
+# agent-fabric commit; bump AGENT_FABRIC_SHA below intentionally to adopt
+# fabric updates (template changes ripple to every managed project on next sync).
+#
+# Fails the build when the project's `.claude/skills/` files don't match
+# what `fabric sync .` would render against `.fabric/config.yaml` right now —
+# i.e. someone hand-edited a rendered skill instead of updating the template
+# in agent-fabric (or a project-local overlay under `.fabric/skills/`).
+#
+# To resolve a failure: edit the source template in agent-fabric, run
+# `fabric sync teach-me-eng-bot` locally, commit the regenerated files.
+
+name: fabric sync drift check
+
+on:
+  pull_request:
+    paths:
+      - '.fabric/**'
+      - '.claude/skills/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout project
+        uses: actions/checkout@v4
+
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install agent-fabric
+        env:
+          AGENT_FABRIC_SHA: ac2adf3dc881023e0f63780840016a8ac42a45dc
+        run: |
+          pip install "agent-fabric @ git+https://github.com/valdisd96/agent-fabric.git@${AGENT_FABRIC_SHA}"
+
+      - name: check skills are synced
+        run: fabric sync . --check
