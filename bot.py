@@ -430,7 +430,10 @@ async def cmd_import(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(
         "Send me a CSV file to import.\n"
         "• One word or phrase per row, in the first column.\n"
-        "• An optional `text` header row is supported.\n"
+        "• Optional second column `translation` is honoured when the header "
+        "is `text,translation`; missing translations get backfilled "
+        "automatically on next start.\n"
+        "• A bare `text` header (or no header) still works.\n"
         "• Existing words are kept; duplicates are skipped.\n"
         f"(Times out in {int(IMPORT_PENDING_TTL // 60)} minutes; "
         f"max {IMPORT_MAX_ROWS} rows / {IMPORT_MAX_BYTES // 1000} KB.)"
@@ -448,7 +451,7 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "Your vocab is empty. Add words with /add or /import."
         )
         return
-    csv_text = vocab.format_csv([r["text"] for r in rows])
+    csv_text = vocab.format_csv([(r["text"], r["translation"]) for r in rows])
     today = datetime.date.today().isoformat()
     filename = f"vocab-{today}.csv"
     await update.message.reply_document(
@@ -497,19 +500,21 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"⚠️ Could not decode file as UTF-8: {e}")
         return
     try:
-        words = vocab.parse_csv_words(text)
+        pairs = vocab.parse_csv_words(text)
     except csv.Error as e:
         await update.message.reply_text(f"⚠️ Could not parse CSV: {e}")
         return
-    if not words:
+    if not pairs:
         await update.message.reply_text("No words found in the file.")
         return
-    if len(words) > IMPORT_MAX_ROWS:
+    if len(pairs) > IMPORT_MAX_ROWS:
         await update.message.reply_text(
-            f"⚠️ Too many rows ({len(words)}; max {IMPORT_MAX_ROWS})."
+            f"⚠️ Too many rows ({len(pairs)}; max {IMPORT_MAX_ROWS})."
         )
         return
-    counts = vocab.add_words_bulk(conn, chat_id, words)
+    words = [w for w, _ in pairs]
+    translations = [t for _, t in pairs]
+    counts = vocab.add_words_bulk(conn, chat_id, words, translations=translations)
     parts = [
         f"added: {counts['added']}",
         f"skipped (duplicate): {counts['skipped']}",

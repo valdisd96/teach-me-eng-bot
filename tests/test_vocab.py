@@ -272,41 +272,49 @@ def test_add_words_bulk_scopes_to_chat(conn: sqlite3.Connection) -> None:
     assert counts == {"added": 1, "skipped": 0, "invalid": 0}
 
 
-def test_parse_csv_words_drops_text_header() -> None:
-    assert vocab.parse_csv_words("text\napple\nbanana\n") == ["apple", "banana"]
+def test_parse_csv_words_drops_text_header() -> None:  # AC2-legacy-header (issue #64)
+    assert vocab.parse_csv_words("text\napple\nbanana\n") == [
+        ("apple", None),
+        ("banana", None),
+    ]
 
 
 def test_parse_csv_words_header_detection_is_case_insensitive() -> None:
-    assert vocab.parse_csv_words("TEXT\napple\n") == ["apple"]
+    assert vocab.parse_csv_words("TEXT\napple\n") == [("apple", None)]
 
 
 def test_parse_csv_words_keeps_header_when_only_row() -> None:
     # A bare list of one line where that line is "text" must not be eaten as a header.
-    assert vocab.parse_csv_words("text\n") == ["text"]
+    assert vocab.parse_csv_words("text\n") == [("text", None)]
 
 
-def test_parse_csv_words_accepts_bare_list_without_header() -> None:
+def test_parse_csv_words_accepts_bare_list_without_header() -> None:  # AC2-legacy-bare (issue #64)
     assert vocab.parse_csv_words("apple\nbanana\ncherry\n") == [
-        "apple",
-        "banana",
-        "cherry",
+        ("apple", None),
+        ("banana", None),
+        ("cherry", None),
     ]
 
 
 def test_parse_csv_words_skips_blank_rows_and_blank_first_cells() -> None:
     text = "apple\n\n , extra\nbanana\n"
     # row 2 is fully empty; row 3's first cell is blank (after strip).
-    assert vocab.parse_csv_words(text) == ["apple", "banana"]
+    assert vocab.parse_csv_words(text) == [("apple", None), ("banana", None)]
 
 
 def test_parse_csv_words_returns_first_column_only() -> None:
     text = "text,note\napple,fruit\nbanana,yellow\n"
-    assert vocab.parse_csv_words(text) == ["apple", "banana"]
+    # `note` is not `translation`, so legacy mode wins and the second column
+    # is dropped. Translations come back as None.
+    assert vocab.parse_csv_words(text) == [("apple", None), ("banana", None)]
 
 
 def test_parse_csv_words_strips_whitespace_but_preserves_case() -> None:
     # Casing is preserved here; lowercasing happens in add_words_bulk via _normalize.
-    assert vocab.parse_csv_words("  Apple  \n  BANANA\n") == ["Apple", "BANANA"]
+    assert vocab.parse_csv_words("  Apple  \n  BANANA\n") == [
+        ("Apple", None),
+        ("BANANA", None),
+    ]
 
 
 def test_parse_csv_words_empty_input() -> None:
@@ -314,30 +322,33 @@ def test_parse_csv_words_empty_input() -> None:
 
 
 def test_format_csv_emits_header_and_sorts_case_insensitively() -> None:
-    out = vocab.format_csv(["banana", "Apple", "cherry"])
-    assert out == "text\nApple\nbanana\ncherry\n"
+    out = vocab.format_csv([("banana", None), ("Apple", None), ("cherry", None)])
+    assert out == "text,translation\nApple,\nbanana,\ncherry,\n"
 
 
 def test_format_csv_empty_list_still_writes_header() -> None:
-    assert vocab.format_csv([]) == "text\n"
+    assert vocab.format_csv([]) == "text,translation\n"
 
 
 def test_format_csv_uses_lf_line_terminator() -> None:
-    out = vocab.format_csv(["apple"])
+    out = vocab.format_csv([("apple", None)])
     assert "\r" not in out
     assert out.endswith("\n")
 
 
 def test_format_csv_quotes_cells_with_csv_special_characters() -> None:
     # csv module must escape commas/quotes so the output round-trips cleanly.
-    out = vocab.format_csv(['needs, comma', 'has "quote"'])
-    assert vocab.parse_csv_words(out) == ['has "quote"', "needs, comma"]
+    out = vocab.format_csv([("needs, comma", None), ('has "quote"', None)])
+    assert vocab.parse_csv_words(out) == [
+        ('has "quote"', None),
+        ("needs, comma", None),
+    ]
 
 
 def test_csv_round_trip_preserves_words() -> None:
-    words = ["apple", "banana split", "cherry"]
-    serialized = vocab.format_csv(words)
-    assert sorted(vocab.parse_csv_words(serialized)) == sorted(words)
+    rows = [("apple", None), ("banana split", None), ("cherry", None)]
+    serialized = vocab.format_csv(rows)
+    assert sorted(vocab.parse_csv_words(serialized)) == sorted(rows)
 
 
 # --- set_translation (issue #63) -------------------------------------------
@@ -564,3 +575,136 @@ def test_add_words_bulk_empty_with_empty_translations(
 ) -> None:  # AC4 — edge: empty input + empty translations
     counts = vocab.add_words_bulk(conn, CHAT, [], translations=[])
     assert counts == {"added": 0, "skipped": 0, "invalid": 0}
+
+
+# --- CSV translation round-trip (issue #64) --------------------------------
+
+
+def test_format_csv_alphabetizes_with_mixed_translations() -> None:  # AC1 — header, alphabetized, None → empty cell never "None"
+    out = vocab.format_csv(
+        [("banana", "банан"), ("apple", None), ("Cherry", "вишня")]
+    )
+    assert out == "text,translation\napple,\nbanana,банан\nCherry,вишня\n", (
+        f"unexpected output: {out!r}"
+    )
+    assert ",None" not in out, "None translation must serialize as empty cell, not literal 'None'"
+
+
+def test_parse_csv_words_two_column_with_translations() -> None:  # AC2-two-col
+    out = vocab.parse_csv_words("text,translation\napple,яблоко\nbanana,банан\n")
+    assert out == [("apple", "яблоко"), ("banana", "банан")], f"got {out!r}"
+
+
+def test_parse_csv_words_two_column_empty_second_cell() -> None:  # AC2-two-col + edge: empty 2nd cell → None
+    out = vocab.parse_csv_words("text,translation\napple,яблоко\nbanana,\n")
+    assert out == [("apple", "яблоко"), ("banana", None)], f"got {out!r}"
+
+
+def test_parse_csv_words_two_column_header_case_insensitive() -> None:  # AC2-two-col-case
+    out = vocab.parse_csv_words("TEXT,Translation\napple,яблоко\n")
+    assert out == [("apple", "яблоко")], f"got {out!r}"
+
+
+def test_add_words_bulk_after_parse_two_col_stores_translations(
+    conn: sqlite3.Connection,
+) -> None:  # AC2-bulk — parse → bulk-insert preserves translations and Nones
+    pairs = vocab.parse_csv_words(
+        "text,translation\napple,яблоко\nbanana,\ncherry,вишня\n"
+    )
+    words = [text for text, _ in pairs]
+    translations = [tr for _, tr in pairs]
+    counts = vocab.add_words_bulk(conn, CHAT, words, translations=translations)
+    assert counts == {"added": 3, "skipped": 0, "invalid": 0}, f"got {counts}"
+    assert _translation_for(conn, CHAT, "apple") == "яблоко"
+    assert _translation_for(conn, CHAT, "banana") is None, (
+        "empty 2nd cell must land as NULL, not empty string"
+    )
+    assert _translation_for(conn, CHAT, "cherry") == "вишня"
+
+
+def test_parse_csv_words_two_column_skips_blank_first_cell() -> None:  # edge: empty first cell in two-col → row skipped
+    text = "text,translation\napple,яблоко\n,orphan\nbanana,банан\n"
+    out = vocab.parse_csv_words(text)
+    assert out == [("apple", "яблоко"), ("banana", "банан")], (
+        f"row with blank first cell must be dropped; got {out!r}"
+    )
+
+
+def test_parse_csv_words_header_only_two_column_returns_legacy_keep_header() -> None:  # edge: header-only two-col input
+    # Two-column mode requires header + at least one data row. With only the header,
+    # the spec resolves this to legacy single-row keep-header behaviour: the row is
+    # treated as data and the first column is returned.
+    out = vocab.parse_csv_words("text,translation\n")
+    assert out == [("text", None)], f"got {out!r}"
+
+
+def test_parse_csv_words_handles_crlf_line_endings() -> None:  # edge: \r\n parses identically to \n
+    crlf = "text,translation\r\napple,яблоко\r\nbanana,банан\r\n"
+    lf = "text,translation\napple,яблоко\nbanana,банан\n"
+    assert vocab.parse_csv_words(crlf) == vocab.parse_csv_words(lf)
+    assert vocab.parse_csv_words(crlf) == [("apple", "яблоко"), ("banana", "банан")]
+
+
+def test_import_keeps_translation_null_when_csv_lacks_it(
+    conn: sqlite3.Connection,
+) -> None:  # AC3 — None translation survives import as NULL; no mid-import translator call
+    # Legacy CSV (single column): every translation parses to None.
+    legacy_pairs = vocab.parse_csv_words("apple\nbanana\n")
+    assert all(tr is None for _, tr in legacy_pairs), f"legacy parse must yield None translations; got {legacy_pairs!r}"
+
+    # Two-column CSV with empty second cells: still None.
+    twocol_pairs = vocab.parse_csv_words("text,translation\ncherry,\ndurian,\n")
+    assert all(tr is None for _, tr in twocol_pairs), f"empty 2nd cells must yield None; got {twocol_pairs!r}"
+
+    pairs = legacy_pairs + twocol_pairs
+    words = [text for text, _ in pairs]
+    translations = [tr for _, tr in pairs]
+    vocab.add_words_bulk(conn, CHAT, words, translations=translations)
+
+    # Each row's translation column is NULL — backfill (out of scope here) will fill them.
+    for w in ("apple", "banana", "cherry", "durian"):
+        assert _translation_for(conn, CHAT, w) is None, (
+            f"{w!r} should have NULL translation after import (no mid-import translate calls)"
+        )
+
+
+def test_csv_round_trip_preserves_translations_through_db(
+    conn: sqlite3.Connection,
+) -> None:  # AC4 — export → fresh-chat import → re-export bit-for-bit
+    source = [("Apple", "яблоко"), ("banana", None), ("Cherry", "вишня")]
+    serialized = vocab.format_csv(source)
+
+    # Import into a fresh chat.
+    fresh_chat = CHAT + 9001
+    pairs = vocab.parse_csv_words(serialized)
+    words = [text for text, _ in pairs]
+    translations = [tr for _, tr in pairs]
+    vocab.add_words_bulk(conn, fresh_chat, words, translations=translations)
+
+    # Re-export from DB.
+    rows = conn.execute(
+        "SELECT text, translation FROM words WHERE chat_id = ?", (fresh_chat,)
+    ).fetchall()
+    redumped = vocab.format_csv([(r["text"], r["translation"]) for r in rows])
+
+    # Spec: round-trip preserves the (text_lowercased, translation) set bit-for-bit.
+    expected = vocab.format_csv(
+        [(text.lower(), tr) for text, tr in source]
+    )
+    assert redumped == expected, (
+        f"round-trip mismatch:\nexpected:\n{expected!r}\nactual:\n{redumped!r}"
+    )
+
+
+def test_csv_round_trip_unicode_preserves_translations() -> None:  # edge: unicode text + translations round-trip
+    rows = [("café", "кофейня"), ("naïve", None), ("Zürich", "Цюрих")]
+    serialized = vocab.format_csv(rows)
+    parsed = vocab.parse_csv_words(serialized)
+    assert sorted(parsed) == sorted(rows), (
+        f"unicode round-trip lost data:\nin:  {rows!r}\nout: {parsed!r}"
+    )
+
+
+def test_format_csv_with_non_tuple_row_raises() -> None:  # error: non-2-tuple → propagates Python's natural unpacking error
+    with pytest.raises((TypeError, ValueError)):
+        vocab.format_csv(["apple"])  # type: ignore[list-item]
