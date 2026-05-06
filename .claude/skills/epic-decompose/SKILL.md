@@ -1,12 +1,12 @@
 ---
 name: epic-decompose
-description: Pre-Stage-1 skill for issues labelled `type:epic`. Runs headless from `scripts/agent-epic-decompose.sh` on a single epic and decomposes it into a set of child issues that the regular plan-exec → test-writer → reviewer pipeline can ship. Multi-round Socratic Q&A with the user across many invocations (one round per dispatch), then proposes a child-issue list, awaits explicit approval (`/decompose-ok`), files the children with `Refs #<parent>`, and parks the parent at `state:tracking`. Does NOT cut branches, write code, or open PRs.
-version: 1.0.0
+description: Decomposition stage for `type:epic` issues at `state:needs-decompose`. Multi-round Socratic Q&A with the user (one round per dispatch), then proposes a child-issue list, awaits explicit approval (`/decompose-ok`), files children with `Refs #<parent>`, and parks the parent at `state:tracking`. Children are filed B3-style — child #1 at `state:needs-planning`, the rest at `state:draft` — so the fabric's coordinator can release them one at a time as each predecessor closes. Considers documentation impact during decomposition so the epic doesn't close with stale docs. Does NOT cut branches, write code, or open PRs.
+version: 2.1.0
 ---
 
 # epic-decompose
 
-Decomposition stage for big features. Splits a `type:epic` parent issue into smaller child issues that the existing pipeline can ship one at a time. One agent invocation = one round; a full decomposition typically spans several Q&A rounds before a proposal is approved.
+Decomposition stage for `type:epic` parents. Splits the epic into smaller child issues that the existing pipeline ships one at a time, in the order you propose. One agent invocation = one round; a full decomposition typically spans several Q&A rounds before a proposal is approved.
 
 ## Hard boundaries
 
@@ -22,14 +22,12 @@ You MUST NOT:
 
 ## Inputs and exit conditions
 
-Dispatched at one of two states:
-- `state:needs-planning` — the entry/resume state. Either the first round, or the user resumed after a clarification answer or feedback on a proposal.
-- `state:awaiting-decompose-approval` — defensive; the runner script accepts this too. In practice the user flips back to `needs-planning` when they want the next dispatch to act.
+Dispatched on a `type:epic` parent at `state:needs-decompose`. That's the entry state on the very first dispatch (set by `qualify-issue`) and also the resume state after the user answers a clarification or asks for proposal revisions.
 
-Exits the run by flipping to one of:
+Exits the run by flipping the state label to one of:
 - `state:clarification-needed` — you posted a question, awaiting answer.
 - `state:awaiting-decompose-approval` — you posted a proposed child list, awaiting `/decompose-ok`.
-- `state:tracking` — children filed, parent now waits for them to merge.
+- `state:tracking` — children filed, parent now waits for them to merge. The fabric's coordinator advances child #2 to planning when child #1 closes, and so on; when the last child closes the parent auto-closes too.
 - `state:blocked` — round cap exhausted or unresolvable error (rare).
 
 ## The decision tree (do this every dispatch)
@@ -54,7 +52,7 @@ Read the issue body and **all** comments. Then walk this tree top-down — first
 
 ```bash
 gh issue edit <N> \
-  --remove-label "state:needs-planning,state:awaiting-decompose-approval" \
+  --remove-label "state:needs-decompose,state:awaiting-decompose-approval" \
   --add-label "state:in-progress"
 ```
 
@@ -78,7 +76,7 @@ gh issue comment <N> --body "$(cat <<'EOF'
 
 Context: <one sentence — what you've already concluded, what depends on this>.
 
-When you answer, flip the label back to `state:needs-planning` to re-enter the loop.
+When you answer, flip the label back to `state:needs-decompose` to re-enter the loop.
 EOF
 )"
 ```
@@ -121,7 +119,7 @@ gh issue comment <N> --body "$(cat <<'EOF'
 
 ---
 
-**Reply `/decompose-ok` to approve.** Then flip `state:awaiting-decompose-approval` → `state:needs-planning` and the next dispatch will file these as child issues. To request changes, comment your feedback and flip back to `state:needs-planning` — I'll revise.
+**Reply `/decompose-ok` to approve.** Then flip `state:awaiting-decompose-approval` → `state:needs-decompose` and the next dispatch will file these as child issues. To request changes, comment your feedback and flip back to `state:needs-decompose` — I'll revise.
 EOF
 )"
 ```
@@ -138,11 +136,23 @@ Print `proposal posted: <N> children, awaiting approval` and exit.
 
 **Sizing rule of thumb.** Aim for 3–8 children. Fewer than 3 → not really an epic; suggest just unlabelling `type:epic` and letting plan-exec handle it. More than 8 → either the epic is too big to plan in one pass (suggest splitting the epic itself), or you're slicing too thin (consolidate).
 
+**Docs hygiene (when applicable).** If the epic adds, removes, or renames user-facing surface — slash commands, `/help` text, README sections, in-app banners, `/start` onboarding flow, configuration env vars, public CLI flags — the documentation needs to land somewhere. Two acceptable shapes:
+- **Trailing `type:docs` child** — a small, focused child at the end of the sequence that updates README + `/help` + any onboarding copy in one PR. Use this when the docs touch multiple files or when several feature children touch the same surface.
+- **Doc touch-ups inside feature children** — fold the docs work into the relevant feature child's acceptance criteria (e.g. AC: `/help` lists the new command). Use this when the docs change is small and tightly coupled to one feature.
+
+Either is fine. The sin is letting the epic auto-close with stale docs because no child owned them. If the epic is purely internal (refactor, infra, test coverage) — no user-facing surface change — say so explicitly in the proposal's "One-line shape" and skip the docs child.
+
 ## 4. File-children round (after `/decompose-ok`)
 
-Triggered when §A1 of the decision tree matches. For each child in the most recent proposal, in the order you listed them:
+Triggered when §A1 of the decision tree matches. For each child in the most recent proposal, **in the order you listed them**:
+
+- The **first** child gets `state:needs-planning` — that's the one the pipeline will pick up immediately.
+- Every **subsequent** child gets `state:draft` — held until its predecessor closes. The fabric's coordinator (in `scheduler.py`) detects each child's closure, parses `Refs #<parent>` from its body, and flips the next `state:draft` sibling to `state:needs-planning` automatically. When the last child closes, the parent auto-closes too.
+
+The `Refs #<N>` line in the body is **load-bearing** — the coordinator parses it. Don't drop it, don't reword it.
 
 ```bash
+# Child #1 — the kick-off:
 gh issue create \
   --title "<imperative title>" \
   --label "type:feat,priority:medium,area:vocab,state:needs-planning" \
@@ -160,6 +170,24 @@ Part of epic #<N>.
 Refs #<N>
 EOF
 )"
+
+# Children #2..K — held until their predecessor closes:
+gh issue create \
+  --title "<imperative title>" \
+  --label "type:feat,priority:medium,area:vocab,state:draft" \
+  --body "$(cat <<EOF
+<one-paragraph problem statement>
+
+## Acceptance criteria
+- AC1: ...
+
+## Out of scope
+- ...
+
+Part of epic #<N>.
+Refs #<N>
+EOF
+)"
 ```
 
 Capture each new issue number from the URL `gh issue create` prints. Then post one closing comment on the parent that lists the child links and flip to `state:tracking`:
@@ -167,13 +195,14 @@ Capture each new issue number from the URL `gh issue create` prints. Then post o
 ```bash
 gh issue comment <N> --body "$(cat <<EOF
 <!-- agent-decompose-filed v1 -->
-**Decomposition filed.** Children:
+**Decomposition filed.** Children (will be released one at a time as each predecessor closes):
 
-- #<C1> — <title>
-- #<C2> — <title>
+- #<C1> — <title> · `state:needs-planning` (active)
+- #<C2> — <title> · `state:draft` (held)
+- #<C3> — <title> · `state:draft` (held)
 - ...
 
-Parent will auto-close once all children are closed (orchestrator coordinator).
+The fabric will advance the next held child to `state:needs-planning` automatically when each closes. Parent auto-closes once the last child is done.
 EOF
 )"
 
@@ -183,8 +212,6 @@ gh issue edit <N> \
 ```
 
 Print `filed <K> children for epic #<N>: <numbers>` and exit.
-
-> **Coordinator caveat:** the auto-close-on-children-done coordinator lives in the orchestrator (separate increment). Until that ships, the parent stays at `state:tracking` and the user closes it manually after all children merge. Mention this in the closing comment if the orchestrator is not yet deployed.
 
 ## 5. What "must-answer" questions look like for an epic
 
@@ -198,6 +225,7 @@ A non-exhaustive checklist of the kinds of unknowns to clear before proposing. W
 - **Test seams.** Anything that needs a refactor *first* to be testable, before the feature children land?
 - **External services / config.** New env vars? New API keys? Quotas?
 - **Naming.** Names of new commands, modules, labels — pick *or* ask.
+- **User-facing docs.** Which docs (README, `/help` command output, in-app banners, `/start` onboarding) describe the surface this epic touches? Are they out-of-date or generic enough to survive without changes? If non-trivial, the docs deserve their own child (or an explicit AC on the relevant feature child) — see "Docs hygiene" in §3.
 
 ## After-the-loop notes
 
