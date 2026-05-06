@@ -273,40 +273,48 @@ def test_add_words_bulk_scopes_to_chat(conn: sqlite3.Connection) -> None:
 
 
 def test_parse_csv_words_drops_text_header() -> None:
-    assert vocab.parse_csv_words("text\napple\nbanana\n") == ["apple", "banana"]
+    assert vocab.parse_csv_words("text\napple\nbanana\n") == [
+        ("apple", None),
+        ("banana", None),
+    ]
 
 
 def test_parse_csv_words_header_detection_is_case_insensitive() -> None:
-    assert vocab.parse_csv_words("TEXT\napple\n") == ["apple"]
+    assert vocab.parse_csv_words("TEXT\napple\n") == [("apple", None)]
 
 
 def test_parse_csv_words_keeps_header_when_only_row() -> None:
     # A bare list of one line where that line is "text" must not be eaten as a header.
-    assert vocab.parse_csv_words("text\n") == ["text"]
+    assert vocab.parse_csv_words("text\n") == [("text", None)]
 
 
 def test_parse_csv_words_accepts_bare_list_without_header() -> None:
     assert vocab.parse_csv_words("apple\nbanana\ncherry\n") == [
-        "apple",
-        "banana",
-        "cherry",
+        ("apple", None),
+        ("banana", None),
+        ("cherry", None),
     ]
 
 
 def test_parse_csv_words_skips_blank_rows_and_blank_first_cells() -> None:
     text = "apple\n\n , extra\nbanana\n"
     # row 2 is fully empty; row 3's first cell is blank (after strip).
-    assert vocab.parse_csv_words(text) == ["apple", "banana"]
+    assert vocab.parse_csv_words(text) == [("apple", None), ("banana", None)]
 
 
 def test_parse_csv_words_returns_first_column_only() -> None:
     text = "text,note\napple,fruit\nbanana,yellow\n"
-    assert vocab.parse_csv_words(text) == ["apple", "banana"]
+    # `note` is not `translation`, so legacy mode wins and the second column
+    # is dropped. Translations come back as None.
+    assert vocab.parse_csv_words(text) == [("apple", None), ("banana", None)]
 
 
 def test_parse_csv_words_strips_whitespace_but_preserves_case() -> None:
     # Casing is preserved here; lowercasing happens in add_words_bulk via _normalize.
-    assert vocab.parse_csv_words("  Apple  \n  BANANA\n") == ["Apple", "BANANA"]
+    assert vocab.parse_csv_words("  Apple  \n  BANANA\n") == [
+        ("Apple", None),
+        ("BANANA", None),
+    ]
 
 
 def test_parse_csv_words_empty_input() -> None:
@@ -314,30 +322,33 @@ def test_parse_csv_words_empty_input() -> None:
 
 
 def test_format_csv_emits_header_and_sorts_case_insensitively() -> None:
-    out = vocab.format_csv(["banana", "Apple", "cherry"])
-    assert out == "text\nApple\nbanana\ncherry\n"
+    out = vocab.format_csv([("banana", None), ("Apple", None), ("cherry", None)])
+    assert out == "text,translation\nApple,\nbanana,\ncherry,\n"
 
 
 def test_format_csv_empty_list_still_writes_header() -> None:
-    assert vocab.format_csv([]) == "text\n"
+    assert vocab.format_csv([]) == "text,translation\n"
 
 
 def test_format_csv_uses_lf_line_terminator() -> None:
-    out = vocab.format_csv(["apple"])
+    out = vocab.format_csv([("apple", None)])
     assert "\r" not in out
     assert out.endswith("\n")
 
 
 def test_format_csv_quotes_cells_with_csv_special_characters() -> None:
     # csv module must escape commas/quotes so the output round-trips cleanly.
-    out = vocab.format_csv(['needs, comma', 'has "quote"'])
-    assert vocab.parse_csv_words(out) == ['has "quote"', "needs, comma"]
+    out = vocab.format_csv([("needs, comma", None), ('has "quote"', None)])
+    assert vocab.parse_csv_words(out) == [
+        ('has "quote"', None),
+        ("needs, comma", None),
+    ]
 
 
 def test_csv_round_trip_preserves_words() -> None:
-    words = ["apple", "banana split", "cherry"]
-    serialized = vocab.format_csv(words)
-    assert sorted(vocab.parse_csv_words(serialized)) == sorted(words)
+    rows = [("apple", None), ("banana split", None), ("cherry", None)]
+    serialized = vocab.format_csv(rows)
+    assert sorted(vocab.parse_csv_words(serialized)) == sorted(rows)
 
 
 # --- set_translation (issue #63) -------------------------------------------

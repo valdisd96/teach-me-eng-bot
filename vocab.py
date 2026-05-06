@@ -194,45 +194,65 @@ def backfill_translations(
     return {"translated": translated, "failed": failed}
 
 
-def parse_csv_words(text: str) -> list[str]:
-    """Extract first-column word strings from a CSV blob.
+def parse_csv_words(text: str) -> list[tuple[str, str | None]]:
+    """Parse a CSV blob into (text, translation_or_None) pairs.
 
-    Header detection: if the first non-empty row's first cell is "text"
-    (case-insensitive) AND there is at least one further row, the first row is
-    treated as a header and dropped. This lets a one-column CSV round-trip
-    cleanly while still letting users paste a bare list (no header) into a
-    `.csv` file. Blank rows and blank first cells are skipped. Returns words
-    with whitespace stripped but NOT lowercased — `add_words_bulk` does the
-    normalization.
+    Two-column mode triggers iff the first non-empty row is exactly
+    `text,translation` (case-insensitive, whitespace-stripped on both cells)
+    AND at least one further row exists. In that mode, each subsequent row's
+    second cell becomes the translation; an empty/missing second cell parses
+    to None.
+
+    Otherwise legacy single-column mode: drop a `text`-only header (same rule
+    as before — case-insensitive, only when at least one more row follows),
+    return every remaining row's first cell paired with None translation.
+    Bare lists with no header round-trip too. Blank rows and rows whose first
+    cell is empty after stripping are skipped. Cells are stripped but NOT
+    lowercased — `add_words_bulk` does the normalization.
     """
     reader = csv.reader(io.StringIO(text))
-    cells: list[str] = []
+    rows: list[list[str]] = []
     for row in reader:
         if not row:
             continue
-        cell = row[0].strip()
-        if not cell:
+        first = row[0].strip()
+        if not first:
             continue
-        cells.append(cell)
-    if len(cells) >= 2 and cells[0].lower() == "text":
-        return cells[1:]
-    return cells
+        rows.append([cell.strip() for cell in row])
+    if not rows:
+        return []
+    first_row = rows[0]
+    is_two_col_header = (
+        len(rows) >= 2
+        and len(first_row) >= 2
+        and first_row[0].lower() == "text"
+        and first_row[1].lower() == "translation"
+    )
+    if is_two_col_header:
+        out: list[tuple[str, str | None]] = []
+        for row in rows[1:]:
+            text_cell = row[0]
+            translation = row[1] if len(row) >= 2 and row[1] else None
+            out.append((text_cell, translation))
+        return out
+    if len(rows) >= 2 and first_row[0].lower() == "text":
+        rows = rows[1:]
+    return [(row[0], None) for row in rows]
 
 
-def format_csv(words: list[str]) -> str:
-    """Serialize a list of words as a CSV string with a single `text` column.
+def format_csv(rows: list[tuple[str, str | None]]) -> str:
+    """Serialize `(text, translation)` pairs as a CSV string.
 
-    Words are sorted alphabetically (case-insensitive) for stable diffs across
-    exports. The header row is always emitted so the file round-trips through
-    `parse_csv_words` and is forward-compatible with future label / POS
-    columns. Uses `\\n` line terminators for predictable cross-platform
-    output.
+    Header `text,translation` is always emitted. Rows are sorted
+    case-insensitively by text for stable diffs. A None translation writes an
+    empty second cell — never the literal string `"None"`. Uses `\\n` line
+    terminators for predictable cross-platform output.
     """
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(["text"])
-    for w in sorted(words, key=str.lower):
-        writer.writerow([w])
+    writer.writerow(["text", "translation"])
+    for text, translation in sorted(rows, key=lambda r: r[0].lower()):
+        writer.writerow([text, translation if translation is not None else ""])
     return buf.getvalue()
 
 
