@@ -324,6 +324,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     load1, load5, load15 = sysinfo.read_loadavg()
     temp = sysinfo.read_temperature()
     free, total = sysinfo.read_disk_free("/")
+    deploy_sha = sysinfo.read_deploy_sha() or "unknown"
     words = vocab.count_words(conn, chat_id)
     server = await llm.health()
     bench_line = await llm.bench()
@@ -332,6 +333,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "System\n"
         f"  Hardware: {hardware}\n"
         f"  OS: {os_name}\n"
+        f"  Version: {deploy_sha}\n"
         f"  Load: {load1:.2f} {load5:.2f} {load15:.2f}\n"
         f"  Temp: {temp}\n"
         f"  Disk /: {sysinfo.format_bytes(free)} free / "

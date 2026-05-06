@@ -7,6 +7,7 @@ should never crash just because a sysfs file is missing off-Pi.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -59,6 +60,29 @@ def read_disk_free(
     """Return (free_bytes, total_bytes) for the filesystem at `path`."""
     du = disk_usage(path)
     return du.free, du.total
+
+
+def read_deploy_sha(path: str = "/var/lib/teach-me-eng-bot/deploy.json") -> str | None:
+    """Return the deployed commit short SHA from the deploy manifest, or None.
+
+    The auto-deploy workflow writes this manifest on every successful deploy
+    (see .github/workflows/deploy.yml). Returns ``short_sha`` if present, else
+    the first 7 chars of ``sha``, else None. Never raises.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    short = data.get("short_sha")
+    if isinstance(short, str) and short:
+        return short
+    full = data.get("sha")
+    if isinstance(full, str) and full:
+        return full[:7]
+    return None
 
 
 def format_bytes(n: float) -> str:
