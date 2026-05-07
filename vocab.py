@@ -194,21 +194,26 @@ def backfill_translations(
     return {"translated": translated, "failed": failed}
 
 
-def parse_csv_words(text: str) -> list[tuple[str, str | None]]:
-    """Parse a CSV blob into (text, translation_or_None) pairs.
+def parse_csv_words(text: str) -> list[tuple[str, str | None, list[str]]]:
+    """Parse a CSV blob into `(text, translation_or_None, labels)` triples.
 
-    Two-column mode triggers iff the first non-empty row is exactly
-    `text,translation` (case-insensitive, whitespace-stripped on both cells)
-    AND at least one further row exists. In that mode, each subsequent row's
-    second cell becomes the translation; an empty/missing second cell parses
-    to None.
+    Header detection (case-insensitive, whitespace-stripped, only when at
+    least one further row follows) selects mode:
 
-    Otherwise legacy single-column mode: drop a `text`-only header (same rule
-    as before — case-insensitive, only when at least one more row follows),
-    return every remaining row's first cell paired with None translation.
-    Bare lists with no header round-trip too. Blank rows and rows whose first
-    cell is empty after stripping are skipped. Cells are stripped but NOT
-    lowercased — `add_words_bulk` does the normalization.
+    - `text,translation,labels` — three-column mode: each subsequent row's
+      second cell is the translation (None when empty/missing) and the third
+      cell is a `;`-separated list of label names. Each label fragment is
+      stripped and lowercased; empty fragments are dropped; no validation
+      happens here (callers validate via `import_rows`).
+    - `text,translation` — two-column mode: translation parsed as before;
+      labels list is empty for every row.
+    - `text` (single cell) — one-column mode.
+    - No recognised header — bare list; each row's first cell, translation
+      None, labels empty.
+
+    Blank rows and rows whose first cell is empty after stripping are
+    skipped. Cells are stripped but NOT lowercased (label fragments are the
+    one exception) — `add_words_bulk` does the text normalisation.
     """
     reader = csv.reader(io.StringIO(text))
     rows: list[list[str]] = []
@@ -222,6 +227,26 @@ def parse_csv_words(text: str) -> list[tuple[str, str | None]]:
     if not rows:
         return []
     first_row = rows[0]
+    is_three_col_header = (
+        len(rows) >= 2
+        and len(first_row) >= 3
+        and first_row[0].lower() == "text"
+        and first_row[1].lower() == "translation"
+        and first_row[2].lower() == "labels"
+    )
+    if is_three_col_header:
+        out: list[tuple[str, str | None, list[str]]] = []
+        for row in rows[1:]:
+            text_cell = row[0]
+            translation = row[1] if len(row) >= 2 and row[1] else None
+            labels_cell = row[2] if len(row) >= 3 else ""
+            labels = [
+                frag.strip().lower()
+                for frag in labels_cell.split(";")
+                if frag.strip()
+            ]
+            out.append((text_cell, translation, labels))
+        return out
     is_two_col_header = (
         len(rows) >= 2
         and len(first_row) >= 2
@@ -229,30 +254,37 @@ def parse_csv_words(text: str) -> list[tuple[str, str | None]]:
         and first_row[1].lower() == "translation"
     )
     if is_two_col_header:
-        out: list[tuple[str, str | None]] = []
+        two: list[tuple[str, str | None, list[str]]] = []
         for row in rows[1:]:
             text_cell = row[0]
             translation = row[1] if len(row) >= 2 and row[1] else None
-            out.append((text_cell, translation))
-        return out
+            two.append((text_cell, translation, []))
+        return two
     if len(rows) >= 2 and first_row[0].lower() == "text":
         rows = rows[1:]
-    return [(row[0], None) for row in rows]
+    return [(row[0], None, []) for row in rows]
 
 
-def format_csv(rows: list[tuple[str, str | None]]) -> str:
-    """Serialize `(text, translation)` pairs as a CSV string.
+def format_csv(rows: list[tuple[str, str | None, list[str]]]) -> str:
+    """Serialize `(text, translation, labels)` triples as a CSV string.
 
-    Header `text,translation` is always emitted. Rows are sorted
-    case-insensitively by text for stable diffs. A None translation writes an
-    empty second cell — never the literal string `"None"`. Uses `\\n` line
-    terminators for predictable cross-platform output.
+    Header `text,translation,labels` is always emitted. Rows are sorted
+    case-insensitively by text for stable diffs. A None translation writes
+    an empty second cell — never the literal string `"None"`. The labels
+    list is joined with `;` in the order given (callers are expected to
+    sort if they want stable ordering); an empty list writes an empty third
+    cell. Uses `\\n` line terminators for predictable cross-platform
+    output.
     """
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(["text", "translation"])
-    for text, translation in sorted(rows, key=lambda r: r[0].lower()):
-        writer.writerow([text, translation if translation is not None else ""])
+    writer.writerow(["text", "translation", "labels"])
+    for text, translation, labels in sorted(rows, key=lambda r: r[0].lower()):
+        writer.writerow([
+            text,
+            translation if translation is not None else "",
+            ";".join(labels),
+        ])
     return buf.getvalue()
 
 
@@ -617,6 +649,108 @@ def labels_for_word(conn: sqlite3.Connection, word_id: int) -> list[str]:
         (word_id,),
     ).fetchall()
     return [r["name"] for r in rows]
+
+
+def labels_for_words_in_chat(
+    conn: sqlite3.Connection, chat_id: int
+) -> dict[int, list[str]]:
+    """Map every word in `chat_id` that has ≥1 label to its sorted label names.
+
+    One query — used by `/export` to avoid an N+1 over `labels_for_word`.
+    Words with no labels are absent from the result; callers default to `[]`.
+    """
+    rows = conn.execute(
+        "SELECT wl.word_id AS word_id, l.name AS name "
+        "FROM word_labels wl "
+        "JOIN labels l ON l.id = wl.label_id "
+        "JOIN words w ON w.id = wl.word_id "
+        "WHERE w.chat_id = ? "
+        "ORDER BY wl.word_id, l.name ASC",
+        (chat_id,),
+    ).fetchall()
+    out: dict[int, list[str]] = {}
+    for r in rows:
+        out.setdefault(r["word_id"], []).append(r["name"])
+    return out
+
+
+def import_rows(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    rows: list[tuple[str, str | None, list[str]]],
+) -> dict[str, object]:
+    """Import `(text, translation, labels)` triples with per-row label handling.
+
+    For each row, in order:
+
+    - normalise the text; an empty result counts toward `invalid` and the
+      row is skipped.
+    - validate the row's label list via `parse_label_spec` (catches malformed
+      tokens like `:noun`, `pos:`, `pos:a:b`); if validation fails, the row
+      counts toward `rejected` with a `(row_idx, message)` entry in
+      `label_errors` and neither the word nor any labels are inserted.
+    - if the validated label list contains more than one distinct `pos:*`
+      token, the row is `rejected` with a multi-POS message; word is not
+      inserted.
+    - otherwise, insert the word (`INSERT OR IGNORE` — duplicates count
+      toward `skipped` and keep their existing translation) and attach each
+      label additively via `get_or_create_label` + `attach_label`. Labels
+      are merged into existing words; existing labels are preserved.
+
+    Returns `{"added": int, "skipped": int, "invalid": int, "rejected": int,
+    "label_errors": list[(int, str)]}`. `row_idx` is 1-based and counts
+    every input row, including ones rejected for any reason.
+    """
+    ensure_chat(conn, chat_id)
+    added = 0
+    skipped = 0
+    invalid = 0
+    rejected = 0
+    label_errors: list[tuple[int, str]] = []
+    now = _now()
+    for i, (raw_text, translation, raw_labels) in enumerate(rows, start=1):
+        normalized = _normalize(raw_text)
+        if not normalized:
+            invalid += 1
+            continue
+        try:
+            labels = parse_label_spec(list(raw_labels))
+        except ValueError as exc:
+            rejected += 1
+            label_errors.append((i, str(exc)))
+            continue
+        pos_labels = [n for n in labels if n.startswith(POS_PREFIX)]
+        if len(pos_labels) > 1:
+            rejected += 1
+            label_errors.append(
+                (i, "multiple POS labels: " + ", ".join(pos_labels))
+            )
+            continue
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO words(chat_id, text, added_at, translation) "
+            "VALUES (?, ?, ?, ?)",
+            (chat_id, normalized, now, translation),
+        )
+        if cur.rowcount > 0:
+            added += 1
+            word_id = cur.lastrowid
+        else:
+            skipped += 1
+            row = conn.execute(
+                "SELECT id FROM words WHERE chat_id = ? AND text = ?",
+                (chat_id, normalized),
+            ).fetchone()
+            word_id = row["id"]
+        for name in labels:
+            label_id = get_or_create_label(conn, chat_id, name)
+            attach_label(conn, word_id, label_id)
+    return {
+        "added": added,
+        "skipped": skipped,
+        "invalid": invalid,
+        "rejected": rejected,
+        "label_errors": label_errors,
+    }
 
 
 def labels_with_counts(
