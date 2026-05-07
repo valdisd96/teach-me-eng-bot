@@ -290,7 +290,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Pick a game: Word → Translation, Translation → Word (vocab quiz, 1–10 rounds; optional label filter, AND across tokens), or Irregular verbs (past simple + past participle, 1–10 rounds). Use /games cancel to end an in-flight game so a new one can start."),
+    ("games", "Pick a game: Word -> Translation, Translation -> Word (vocab quiz, 1-10 rounds; optional label filter, AND across tokens), or Irregular verbs (past simple + past participle, 1-10 rounds). Use /games cancel to end an in-flight game so a new one can start."),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),

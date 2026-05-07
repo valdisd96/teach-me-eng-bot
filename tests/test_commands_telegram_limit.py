@@ -54,18 +54,21 @@ def _games_desc() -> str:
 
 
 def test_all_commands_descriptions_within_256_chars() -> None:  # AC1, edge: boundary `<=` not `<`
-    """Every (name, desc) in bot.COMMANDS must satisfy len(desc) <= 256.
+    """Every (name, desc) in bot.COMMANDS must satisfy len(desc.encode("utf-8")) <= 256.
 
-    Telegram's setMyCommands API rejects any description over 256 chars; the
-    bot crashes at startup if any entry exceeds the limit. Boundary direction:
-    exactly 256 must pass (hence `<= 256`, not `< 256`).
+    Telegram's setMyCommands API enforces the 256 limit on the UTF-8 byte length
+    of the description, not the Unicode code-point count. A previous fix passed
+    a char-length check but still tripped the wire-level byte check (#110).
+    Boundary direction: exactly 256 bytes must pass (hence `<= 256`, not `< 256`).
     """
     offenders = [
-        (name, len(desc)) for name, desc in bot.COMMANDS if len(desc) > TELEGRAM_DESC_MAX
+        (name, len(desc.encode("utf-8")))
+        for name, desc in bot.COMMANDS
+        if len(desc.encode("utf-8")) > TELEGRAM_DESC_MAX
     ]
     assert not offenders, (
-        f"AC1: every COMMANDS description must be <= {TELEGRAM_DESC_MAX} chars; "
-        f"offenders (name, length): {offenders}"
+        f"AC1: every COMMANDS description must be <= {TELEGRAM_DESC_MAX} UTF-8 bytes; "
+        f"offenders (name, byte-length): {offenders}"
     )
 
 
@@ -100,9 +103,27 @@ def test_non_games_entries_byte_for_byte_unchanged() -> None:  # AC5 — drive-b
     )
 
 
-def test_commands_names_and_ordering_preserved() -> None:  # AC5 / Public API — same names, same order
+def test_commands_names_and_ordering_preserved() -> None:  # AC7 — documented order preserved
     actual_names = [name for name, _ in bot.COMMANDS]
     assert actual_names == EXPECTED_NAMES_IN_ORDER, (
-        "Public API: COMMANDS must retain the same names in the same order; "
+        f"AC7: COMMANDS names must appear in the documented order; "
         f"expected {EXPECTED_NAMES_IN_ORDER}, got {actual_names}"
     )
+
+
+def test_games_description_is_pure_ascii() -> None:  # AC6 — pure-ASCII drift guard
+    """The /games description must be pure ASCII so future char/byte counts agree.
+
+    Non-ASCII glyphs (e.g. `→`, `–`, em-dash, accents) cost multiple UTF-8 bytes
+    each and silently inflate the wire-level byte length past 256 even when the
+    code-point count looks safe — exactly how #110 happened. Locking the string
+    to ASCII makes len(desc) and len(desc.encode("utf-8")) coincide.
+    """
+    desc = _games_desc()
+    try:
+        desc.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise AssertionError(
+            f"AC6: /games description must be pure ASCII; non-ASCII char at offset "
+            f"{exc.start}..{exc.end} ({desc[exc.start:exc.end]!r}); full desc: {desc!r}"
+        ) from None
