@@ -227,9 +227,11 @@ def parse_csv_words(text: str) -> list[tuple[str, str | None, list[str]]]:
     if not rows:
         return []
     first_row = rows[0]
+    # 3-col header detection is purely structural — header-only short-circuits
+    # to [] via the empty rows[1:] loop, so the empty-chat round-trip stays
+    # lossless (issue #87).
     is_three_col_header = (
-        len(rows) >= 2
-        and len(first_row) >= 3
+        len(first_row) >= 3
         and first_row[0].lower() == "text"
         and first_row[1].lower() == "translation"
         and first_row[2].lower() == "labels"
