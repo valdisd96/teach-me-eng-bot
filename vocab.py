@@ -474,3 +474,117 @@ def select_word(
     weights = [compute_weight(r, now) for r in rows]
     pick = (rng or random).choices(rows, weights=weights, k=1)
     return pick[0]
+
+
+# --- labels (per-chat many-to-many tags on words) ---------------------------
+
+POS_PREFIX = "pos:"
+
+
+def get_or_create_label(conn: sqlite3.Connection, chat_id: int, name: str) -> int:
+    """Return the id of `(chat_id, name)`, inserting the row if needed.
+
+    Idempotent: calling twice with the same `(chat_id, name)` returns the same
+    id and leaves a single row in `labels`.
+    """
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO labels(chat_id, name) VALUES (?, ?)",
+        (chat_id, name),
+    )
+    if cur.rowcount > 0:
+        return cur.lastrowid
+    row = conn.execute(
+        "SELECT id FROM labels WHERE chat_id = ? AND name = ?",
+        (chat_id, name),
+    ).fetchone()
+    return row["id"]
+
+
+def attach_label(conn: sqlite3.Connection, word_id: int, label_id: int) -> bool:
+    """Attach `label_id` to `word_id`. Returns True iff a new row was inserted.
+
+    Raises `KeyError(label_id)` when the label does not exist.
+
+    Enforces the "one POS per word" rule: when the label's name starts with
+    `pos:`, any other `pos:*` row on this word is detached first. The
+    detach + insert run inside an explicit transaction so observers never see
+    a state where both old and new `pos:*` are simultaneously attached.
+    """
+    label = conn.execute(
+        "SELECT name FROM labels WHERE id = ?", (label_id,)
+    ).fetchone()
+    if label is None:
+        raise KeyError(label_id)
+    is_pos = label["name"].startswith(POS_PREFIX)
+    conn.execute("BEGIN")
+    try:
+        if is_pos:
+            conn.execute(
+                "DELETE FROM word_labels "
+                "WHERE word_id = ? "
+                "  AND label_id != ? "
+                "  AND label_id IN (SELECT id FROM labels WHERE name LIKE ?)",
+                (word_id, label_id, f"{POS_PREFIX}%"),
+            )
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO word_labels(word_id, label_id) VALUES (?, ?)",
+            (word_id, label_id),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return cur.rowcount > 0
+
+
+def detach_label(conn: sqlite3.Connection, word_id: int, label_id: int) -> bool:
+    """Detach `label_id` from `word_id`. Returns True iff a row was deleted."""
+    cur = conn.execute(
+        "DELETE FROM word_labels WHERE word_id = ? AND label_id = ?",
+        (word_id, label_id),
+    )
+    return cur.rowcount > 0
+
+
+def labels_for_word(conn: sqlite3.Connection, word_id: int) -> list[str]:
+    """Names of every label attached to `word_id`, sorted ascending."""
+    rows = conn.execute(
+        "SELECT l.name FROM labels l "
+        "JOIN word_labels wl ON wl.label_id = l.id "
+        "WHERE wl.word_id = ? "
+        "ORDER BY l.name ASC",
+        (word_id,),
+    ).fetchall()
+    return [r["name"] for r in rows]
+
+
+def words_matching_labels(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    names: list[str],
+) -> list[sqlite3.Row]:
+    """Words for `chat_id` tagged with **all** of `names` (AND semantics).
+
+    Duplicate entries in `names` are deduped — `["pos:noun", "pos:noun"]`
+    matches the same words as `["pos:noun"]`. An empty `names` returns every
+    word for the chat (no filter). Result ordering matches `list_words`:
+    mention_count ASC, added_at DESC.
+    """
+    if not names:
+        return conn.execute(
+            "SELECT * FROM words WHERE chat_id = ? "
+            "ORDER BY mention_count ASC, added_at DESC",
+            (chat_id,),
+        ).fetchall()
+    unique_names = list(dict.fromkeys(names))
+    placeholders = ",".join("?" * len(unique_names))
+    return conn.execute(
+        f"SELECT w.* FROM words w "
+        f"JOIN word_labels wl ON wl.word_id = w.id "
+        f"JOIN labels l ON l.id = wl.label_id "
+        f"WHERE w.chat_id = ? AND l.chat_id = ? AND l.name IN ({placeholders}) "
+        f"GROUP BY w.id "
+        f"HAVING COUNT(DISTINCT l.name) = ? "
+        f"ORDER BY w.mention_count ASC, w.added_at DESC",
+        (chat_id, chat_id, *unique_names, len(unique_names)),
+    ).fetchall()
