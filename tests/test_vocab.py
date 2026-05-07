@@ -1091,3 +1091,503 @@ def test_find_word_id_scopes_to_chat(conn: sqlite3.Connection) -> None:  # AC6 �
     assert a != b, f"per-chat rows must yield distinct ids; got {a} vs {b}"
     # Lookup in a third chat returns None even though other chats have the word.
     assert vocab.find_word_id(conn, CHAT + 999, "horse") is None
+
+
+# --- CSV labels round-trip (issue #87) -------------------------------------
+
+
+def _word_label_count(conn: sqlite3.Connection, chat_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM word_labels wl "
+        "JOIN words w ON w.id = wl.word_id WHERE w.chat_id = ?",
+        (chat_id,),
+    ).fetchone()["n"]
+
+
+def _labels_table_count(conn: sqlite3.Connection, chat_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM labels WHERE chat_id = ?", (chat_id,)
+    ).fetchone()["n"]
+
+
+def test_format_csv_with_labels_joins_with_semicolon() -> None:  # AC1-export-cell — labels list joined w/ ";"
+    out = vocab.format_csv(
+        [("apple", "яблоко", ["pos:noun", "type:medicine"])]
+    )
+    assert (
+        out == "text,translation,labels\napple,яблоко,pos:noun;type:medicine\n"
+    ), f"got {out!r}"
+
+
+def test_format_csv_empty_labels_emits_empty_third_cell() -> None:  # AC1-export-cell — empty list → empty cell, never "[]"/"None"
+    out = vocab.format_csv([("banana", None, [])])
+    assert out == "text,translation,labels\nbanana,,\n", f"got {out!r}"
+    assert "[]" not in out, "empty labels must be empty cell, never literal '[]'"
+    assert "None" not in out, "empty labels must be empty cell, never literal 'None'"
+
+
+def test_format_csv_preserves_caller_label_order() -> None:  # AC1-export-cell — labels emitted in order given
+    # Caller's order is honoured (sorting is the caller's responsibility, not format_csv's).
+    out = vocab.format_csv(
+        [("apple", None, ["zeta:last", "alpha:first", "mu:middle"])]
+    )
+    # Find the labels cell line and confirm the ;-join preserves the input ordering.
+    body = out.splitlines()[1]
+    assert body.endswith(",zeta:last;alpha:first;mu:middle"), (
+        f"label order should match caller; got line {body!r}"
+    )
+
+
+def test_format_csv_quotes_label_cell_with_comma() -> None:  # edge — label cell with a comma is CSV-quoted
+    # The csv module must quote any cell that contains a comma; round-tripping
+    # back through parse_csv_words is the cleanest assertion.
+    out = vocab.format_csv([("apple", None, ["weird,name", "pos:noun"])])
+    parsed = vocab.parse_csv_words(out)
+    assert parsed == [("apple", None, ["weird,name", "pos:noun"])], (
+        f"comma in a label name must round-trip via csv quoting; got {parsed!r}"
+    )
+
+
+def test_parse_csv_words_three_col_header_parses_labels() -> None:  # AC2-import-with-labels — 3-col header detected, labels split on ";"
+    out = vocab.parse_csv_words(
+        "text,translation,labels\napple,яблоко,pos:noun;type:fruit\n"
+    )
+    assert out == [("apple", "яблоко", ["pos:noun", "type:fruit"])], f"got {out!r}"
+
+
+def test_parse_csv_words_three_col_header_case_insensitive() -> None:  # AC2 — case-insensitive header detection
+    out = vocab.parse_csv_words(
+        "TEXT,Translation,LABELS\napple,яблоко,pos:noun\n"
+    )
+    assert out == [("apple", "яблоко", ["pos:noun"])], f"got {out!r}"
+
+
+def test_parse_csv_words_three_col_empty_labels_cell() -> None:  # edge — empty labels cell → []
+    out = vocab.parse_csv_words("text,translation,labels\napple,яблоко,\n")
+    assert out == [("apple", "яблоко", [])], (
+        f"empty labels cell must be [] (not [''], not None); got {out!r}"
+    )
+
+
+def test_parse_csv_words_three_col_strips_whitespace_in_labels() -> None:  # edge — "pos:noun ; type:medicine" → both stripped
+    out = vocab.parse_csv_words(
+        "text,translation,labels\napple,,pos:noun ; type:medicine\n"
+    )
+    assert out == [("apple", None, ["pos:noun", "type:medicine"])], (
+        f"whitespace inside labels cell must be stripped; got {out!r}"
+    )
+
+
+def test_parse_csv_words_three_col_drops_trailing_empty_fragment() -> None:  # edge — "pos:noun;" → ["pos:noun"]
+    out = vocab.parse_csv_words("text,translation,labels\napple,,pos:noun;\n")
+    assert out == [("apple", None, ["pos:noun"])], (
+        f"trailing ';' must drop empty fragment; got {out!r}"
+    )
+
+
+def test_parse_csv_words_three_col_lowercases_labels() -> None:  # edge — "POS:Noun" → "pos:noun"
+    out = vocab.parse_csv_words(
+        "text,translation,labels\napple,,POS:Noun;TYPE:Fruit\n"
+    )
+    assert out == [("apple", None, ["pos:noun", "type:fruit"])], (
+        f"labels must be lowercased on parse; got {out!r}"
+    )
+
+
+def test_parse_csv_words_three_col_header_only_returns_empty() -> None:  # AC-rework-header-only — header-only 3-col → []
+    out = vocab.parse_csv_words("text,translation,labels\n")
+    # Spec: "parse_csv_words('text,translation,labels\\n') returns []."
+    assert out == [], f"header-only 3-col must yield []; got {out!r}"
+
+
+def test_parse_csv_words_three_col_handles_crlf() -> None:  # edge — CRLF parses identically to LF
+    crlf = "text,translation,labels\r\napple,яблоко,pos:noun\r\n"
+    lf = "text,translation,labels\napple,яблоко,pos:noun\n"
+    assert vocab.parse_csv_words(crlf) == vocab.parse_csv_words(lf)
+    assert vocab.parse_csv_words(crlf) == [("apple", "яблоко", ["pos:noun"])]
+
+
+def test_labels_for_words_in_chat_returns_sorted_per_word(conn: sqlite3.Connection) -> None:  # API — values sorted ASC per word
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    # Attach in a deliberately non-alphabetic order; the result must come back sorted.
+    for name in ("type:medicine", "pos:noun", "category:fruit"):
+        vocab.attach_label(conn, wid, vocab.get_or_create_label(conn, CHAT, name))
+
+    out = vocab.labels_for_words_in_chat(conn, CHAT)
+    assert out == {wid: ["category:fruit", "pos:noun", "type:medicine"]}, (
+        f"per-word values must be sorted ASC; got {out!r}"
+    )
+
+
+def test_labels_for_words_in_chat_omits_words_with_no_labels(conn: sqlite3.Connection) -> None:  # API — only words with ≥1 label keyed
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.add_word(conn, CHAT, "banana")  # no labels
+    wid_apple = _word_id(conn, CHAT, "apple")
+    vocab.attach_label(
+        conn, wid_apple, vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    )
+
+    out = vocab.labels_for_words_in_chat(conn, CHAT)
+    assert out == {wid_apple: ["pos:noun"]}, (
+        f"words with no labels must be absent (callers default to []); got {out!r}"
+    )
+
+
+def test_labels_for_words_in_chat_scopes_to_chat(conn: sqlite3.Connection) -> None:  # API — different chats don't leak
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.add_word(conn, CHAT + 1, "apple")
+    wid_a = _word_id(conn, CHAT, "apple")
+    wid_b = _word_id(conn, CHAT + 1, "apple")
+    vocab.attach_label(conn, wid_a, vocab.get_or_create_label(conn, CHAT, "pos:noun"))
+    vocab.attach_label(
+        conn, wid_b, vocab.get_or_create_label(conn, CHAT + 1, "type:medicine")
+    )
+
+    out_a = vocab.labels_for_words_in_chat(conn, CHAT)
+    out_b = vocab.labels_for_words_in_chat(conn, CHAT + 1)
+    assert out_a == {wid_a: ["pos:noun"]}, f"chat A leaked or lost rows; got {out_a!r}"
+    assert out_b == {wid_b: ["type:medicine"]}, f"chat B leaked or lost rows; got {out_b!r}"
+
+
+def test_import_rows_creates_and_attaches_labels(conn: sqlite3.Connection) -> None:  # AC2-import-with-labels — get_or_create + attach
+    counts = vocab.import_rows(
+        conn,
+        CHAT,
+        [("apple", "яблоко", ["pos:noun", "type:fruit"])],
+    )
+    assert counts["added"] == 1
+    assert counts["rejected"] == 0
+    assert counts["label_errors"] == []
+
+    wid = _word_id(conn, CHAT, "apple")
+    assert vocab.labels_for_word(conn, wid) == ["pos:noun", "type:fruit"], (
+        "labels must have been created via get_or_create_label and attached"
+    )
+
+
+def test_import_rows_pre_existing_labels_preserved_additive(conn: sqlite3.Connection) -> None:  # AC2-import-with-labels — additive merge, no deletion
+    # Seed: word with one pre-existing label.
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    vocab.attach_label(
+        conn, wid, vocab.get_or_create_label(conn, CHAT, "category:fruit")
+    )
+
+    # Import the same word with a different label; pre-existing label must survive.
+    vocab.import_rows(conn, CHAT, [("apple", None, ["type:fruit"])])
+
+    after = vocab.labels_for_word(conn, wid)
+    assert "category:fruit" in after, (
+        f"pre-existing label must survive import (additive merge); got {after!r}"
+    )
+    assert "type:fruit" in after, f"new label must be attached; got {after!r}"
+
+
+def test_import_rows_two_col_csv_no_label_changes(conn: sqlite3.Connection) -> None:  # AC2-import-no-labels-column — 2-col leaves label tables alone
+    rows = vocab.parse_csv_words("text,translation\napple,яблоко\nbanana,банан\n")
+    counts = vocab.import_rows(conn, CHAT, rows)
+
+    assert counts["added"] == 2, f"expected 2 added; got {counts!r}"
+    assert counts["rejected"] == 0, f"rejected must be 0 for label-free CSV; got {counts!r}"
+    assert counts["label_errors"] == []
+    assert _labels_table_count(conn, CHAT) == 0, "no labels rows should be created"
+    assert _word_label_count(conn, CHAT) == 0, "no word_labels rows should be created"
+
+
+def test_import_rows_legacy_one_col_no_label_changes(conn: sqlite3.Connection) -> None:  # AC5-backwards-compat — 1-col legacy import
+    rows = vocab.parse_csv_words("text\napple\nbanana\n")
+    counts = vocab.import_rows(conn, CHAT, rows)
+
+    assert counts["added"] == 2, f"got {counts!r}"
+    assert counts["rejected"] == 0
+    assert _labels_table_count(conn, CHAT) == 0
+    assert _word_label_count(conn, CHAT) == 0
+
+
+def test_import_rows_no_header_bare_list_no_label_changes(conn: sqlite3.Connection) -> None:  # AC5-backwards-compat — no-header bare list
+    rows = vocab.parse_csv_words("apple\nbanana\ncherry\n")
+    counts = vocab.import_rows(conn, CHAT, rows)
+
+    assert counts["added"] == 3, f"got {counts!r}"
+    assert counts["rejected"] == 0
+    assert _labels_table_count(conn, CHAT) == 0
+
+
+def test_import_rows_existing_csv_counts_match_add_words_bulk(
+    conn: sqlite3.Connection,
+) -> None:  # AC2-import-no-labels-column — added/skipped/invalid identical to today
+    vocab.add_word(conn, CHAT, "apple")  # pre-existing → should be skipped on import
+
+    rows = vocab.parse_csv_words("apple\nbanana\n   \ncherry\n")
+    counts = vocab.import_rows(conn, CHAT, rows)
+    # apple (skipped, dup); banana (added); blank row dropped at parse, not invalid;
+    # cherry (added). Mirror what add_words_bulk would have produced today.
+    assert counts["added"] == 2, f"added: {counts!r}"
+    assert counts["skipped"] == 1, f"skipped: {counts!r}"
+    assert counts["rejected"] == 0
+    assert counts["label_errors"] == []
+
+
+def test_import_rows_rejects_multi_pos(conn: sqlite3.Connection) -> None:  # AC3-multi-pos-rejected — rejected++, label_errors entry, word NOT inserted
+    counts = vocab.import_rows(
+        conn,
+        CHAT,
+        [("apple", None, ["pos:noun", "pos:verb"])],
+    )
+    assert counts["rejected"] == 1, f"rejected count: {counts!r}"
+    assert counts["added"] == 0, f"multi-pos row must NOT be inserted; got {counts!r}"
+    assert len(counts["label_errors"]) == 1, f"one error expected; got {counts!r}"
+
+    row_idx, msg = counts["label_errors"][0]
+    assert row_idx == 1, f"row index must be 1-based; got {row_idx}"
+    assert "pos" in msg.lower(), f"message should mention POS; got {msg!r}"
+
+    # The word was NOT inserted.
+    found = conn.execute(
+        "SELECT 1 FROM words WHERE chat_id = ? AND text = 'apple'", (CHAT,)
+    ).fetchone()
+    assert found is None, "rejected row's word must not be in the words table"
+
+
+def test_import_rows_continues_after_rejection(conn: sqlite3.Connection) -> None:  # AC3 — following rows still imported
+    counts = vocab.import_rows(
+        conn,
+        CHAT,
+        [
+            ("apple", None, ["pos:noun", "pos:verb"]),  # rejected
+            ("banana", None, ["type:fruit"]),  # imported normally
+            ("cherry", None, []),  # imported, no labels
+        ],
+    )
+    assert counts["rejected"] == 1, f"got {counts!r}"
+    assert counts["added"] == 2, (
+        f"banana + cherry must import despite apple being rejected; got {counts!r}"
+    )
+
+    # banana exists with type:fruit attached; cherry exists with no labels; apple absent.
+    banana_id = vocab.find_word_id(conn, CHAT, "banana")
+    cherry_id = vocab.find_word_id(conn, CHAT, "cherry")
+    assert banana_id is not None, "banana must be inserted"
+    assert cherry_id is not None, "cherry must be inserted"
+    assert vocab.find_word_id(conn, CHAT, "apple") is None, "apple must not be inserted"
+    assert vocab.labels_for_word(conn, banana_id) == ["type:fruit"]
+    assert vocab.labels_for_word(conn, cherry_id) == []
+
+
+@pytest.mark.parametrize("bad_label", [":noun", "pos:", "pos:a:b"])
+def test_import_rows_rejects_malformed_label(
+    conn: sqlite3.Connection, bad_label: str
+) -> None:  # AC3-malformed-labels — :noun, pos:, pos:a:b each rejected
+    counts = vocab.import_rows(
+        conn,
+        CHAT,
+        [
+            ("apple", None, [bad_label]),  # rejected
+            ("banana", None, []),  # imported normally
+        ],
+    )
+    assert counts["rejected"] == 1, f"{bad_label!r} should reject; got {counts!r}"
+    assert counts["added"] == 1, (
+        f"banana must still import after apple is rejected for {bad_label!r}; got {counts!r}"
+    )
+    assert len(counts["label_errors"]) == 1
+    row_idx, msg = counts["label_errors"][0]
+    assert row_idx == 1, f"row index must be 1-based; got {row_idx}"
+    assert "malformed" in msg.lower(), (
+        f"message should reference malformed labels; got {msg!r}"
+    )
+
+    # apple was NOT inserted; banana was.
+    assert vocab.find_word_id(conn, CHAT, "apple") is None, (
+        f"row with malformed label {bad_label!r} must not produce a word row"
+    )
+    assert vocab.find_word_id(conn, CHAT, "banana") is not None
+
+
+def test_import_rows_label_error_index_is_one_based(conn: sqlite3.Connection) -> None:  # AC3 — first row's error has row_idx=1
+    counts = vocab.import_rows(
+        conn,
+        CHAT,
+        [
+            ("apple", None, []),  # row 1 — clean
+            ("banana", None, ["pos:noun", "pos:verb"]),  # row 2 — rejected
+            ("cherry", None, [":bad"]),  # row 3 — rejected (malformed)
+        ],
+    )
+    indices = sorted(idx for idx, _ in counts["label_errors"])
+    assert indices == [2, 3], (
+        f"row indices must be 1-based and reference original row position; got {indices!r}"
+    )
+
+
+def test_import_rows_dedupes_duplicate_labels_in_row(conn: sqlite3.Connection) -> None:  # edge — "pos:noun;pos:noun" → not rejected, attached once
+    counts = vocab.import_rows(
+        conn,
+        CHAT,
+        [("apple", None, ["pos:noun", "pos:noun"])],
+    )
+    # Per spec: duplicate labels in same row are deduped, NOT a multi-pos rejection.
+    assert counts["rejected"] == 0, (
+        f"duplicate identical labels must NOT trigger multi-pos rejection; got {counts!r}"
+    )
+    assert counts["added"] == 1, f"got {counts!r}"
+
+    wid = _word_id(conn, CHAT, "apple")
+    assert vocab.labels_for_word(conn, wid) == ["pos:noun"], (
+        "duplicate pos:noun must collapse to one attached label"
+    )
+
+
+def test_import_rows_skips_existing_word_but_attaches_new_labels(
+    conn: sqlite3.Connection,
+) -> None:  # edge — duplicate text → skipped count, labels still attached additively
+    # Seed: existing word with one label.
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    vocab.attach_label(
+        conn, wid, vocab.get_or_create_label(conn, CHAT, "type:fruit")
+    )
+
+    # Import the same text with a new label.
+    counts = vocab.import_rows(conn, CHAT, [("apple", None, ["pos:noun"])])
+
+    assert counts["added"] == 0, f"existing word must not re-add; got {counts!r}"
+    assert counts["skipped"] == 1, f"existing word must count as skipped; got {counts!r}"
+    after = vocab.labels_for_word(conn, wid)
+    assert sorted(after) == ["pos:noun", "type:fruit"], (
+        f"labels must be additive even when the row is skipped; got {after!r}"
+    )
+
+
+def test_import_rows_empty_input_zero_counts(conn: sqlite3.Connection) -> None:  # edge — [] → all-zero counts, no label_errors
+    counts = vocab.import_rows(conn, CHAT, [])
+    assert counts["added"] == 0
+    assert counts["skipped"] == 0
+    assert counts["invalid"] == 0
+    assert counts["rejected"] == 0
+    assert counts["label_errors"] == []
+
+
+def test_import_rows_does_not_raise_on_bad_row_content(conn: sqlite3.Connection) -> None:  # error — malformed labels propagate via label_errors, not exception
+    # Spec: "import_rows itself never raises on row content; it only raises on
+    # programmer errors (e.g. mismatched argument types)."
+    try:
+        counts = vocab.import_rows(
+            conn,
+            CHAT,
+            [
+                ("apple", None, [":noun"]),
+                ("banana", None, ["pos:noun", "pos:verb"]),
+                ("cherry", None, ["pos:a:b"]),
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 — spec forbids any raise here
+        pytest.fail(f"import_rows must not raise on bad row content; raised {exc!r}")
+
+    assert counts["rejected"] == 3, (
+        f"all three malformed rows must surface via rejected/label_errors; got {counts!r}"
+    )
+    assert len(counts["label_errors"]) == 3
+
+
+def test_csv_round_trip_preserves_label_set(conn: sqlite3.Connection) -> None:  # AC4 — export → wipe → import reproduces every word's label set
+    # Seed chat A with three words and disjoint label sets.
+    src_chat = CHAT
+    vocab.add_word(conn, src_chat, "apple")
+    vocab.add_word(conn, src_chat, "banana")
+    vocab.add_word(conn, src_chat, "cherry")  # no labels
+    wid_apple = _word_id(conn, src_chat, "apple")
+    wid_banana = _word_id(conn, src_chat, "banana")
+    for name in ("pos:noun", "type:fruit"):
+        vocab.attach_label(
+            conn, wid_apple, vocab.get_or_create_label(conn, src_chat, name)
+        )
+    vocab.attach_label(
+        conn, wid_banana, vocab.get_or_create_label(conn, src_chat, "pos:noun")
+    )
+
+    # Export: build triples the way /export does — labels via labels_for_words_in_chat.
+    label_map = vocab.labels_for_words_in_chat(conn, src_chat)
+    rows = conn.execute(
+        "SELECT id, text, translation FROM words WHERE chat_id = ?", (src_chat,)
+    ).fetchall()
+    triples = [
+        (r["text"], r["translation"], label_map.get(r["id"], [])) for r in rows
+    ]
+    serialized = vocab.format_csv(triples)
+
+    # Round-trip into a fresh chat (the "wipe" simulation).
+    fresh_chat = src_chat + 12345
+    parsed = vocab.parse_csv_words(serialized)
+    counts = vocab.import_rows(conn, fresh_chat, parsed)
+    assert counts["rejected"] == 0, (
+        f"clean export must not reject anything on import; got {counts!r}"
+    )
+
+    # Verify each word's label set matches the source.
+    expected = {
+        "apple": {"pos:noun", "type:fruit"},
+        "banana": {"pos:noun"},
+        "cherry": set(),
+    }
+    for text, want in expected.items():
+        wid = vocab.find_word_id(conn, fresh_chat, text)
+        assert wid is not None, f"{text!r} missing after round-trip import"
+        got = set(vocab.labels_for_word(conn, wid))
+        assert got == want, (
+            f"label set for {text!r} must round-trip exactly; want {want!r}, got {got!r}"
+        )
+
+
+# --- CSV labels rework: header-only short-circuit (issue #87 rework) -------
+
+
+def test_parse_csv_words_three_col_header_only_crlf() -> None:  # AC-rework-header-only-crlf — CRLF header-only → []
+    out = vocab.parse_csv_words("text,translation,labels\r\n")
+    assert out == [], f"CRLF header-only 3-col must yield []; got {out!r}"
+
+
+def test_parse_csv_words_three_col_header_only_mixed_case() -> None:  # AC-rework-header-case — case-insensitive header-only → []
+    out = vocab.parse_csv_words("Text,Translation,Labels\n")
+    assert out == [], f"mixed-case header-only 3-col must yield []; got {out!r}"
+
+
+def test_parse_csv_words_three_col_header_only_then_blank_row() -> None:  # edge — header + whitespace-only row → []
+    # Spec edge: "3-col header followed by one blank/whitespace-only row → still
+    # [] (the blank-row skip already drops it before header detection runs)."
+    out = vocab.parse_csv_words("text,translation,labels\n   \n")
+    assert out == [], f"header + blank row must yield []; got {out!r}"
+
+
+def test_csv_round_trip_empty_chat_is_lossless(conn: sqlite3.Connection) -> None:  # AC4-round-trip-empty — format_csv([]) → parse → import yields zero rows
+    # Empty source: an empty chat has no words.
+    serialized = vocab.format_csv([])
+    parsed = vocab.parse_csv_words(serialized)
+    assert parsed == [], (
+        f"format_csv([]) must round-trip to []; got {parsed!r} from {serialized!r}"
+    )
+
+    fresh_chat = CHAT + 99999
+    counts = vocab.import_rows(conn, fresh_chat, parsed)
+    assert counts["added"] == 0, f"empty round-trip must insert 0 words; got {counts!r}"
+    assert counts["skipped"] == 0, f"empty round-trip must skip 0; got {counts!r}"
+    assert counts["rejected"] == 0, f"empty round-trip must reject 0; got {counts!r}"
+    assert counts["label_errors"] == [], (
+        f"empty round-trip must produce 0 label_errors; got {counts!r}"
+    )
+
+    # Zero words and zero word_labels rows for the fresh chat.
+    word_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM words WHERE chat_id = ?", (fresh_chat,)
+    ).fetchone()["n"]
+    assert word_count == 0, f"empty round-trip must not insert any words; got {word_count}"
+
+    wl_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM word_labels wl "
+        "JOIN words w ON w.id = wl.word_id WHERE w.chat_id = ?",
+        (fresh_chat,),
+    ).fetchone()["n"]
+    assert wl_count == 0, (
+        f"empty round-trip must not insert any word_labels rows; got {wl_count}"
+    )
