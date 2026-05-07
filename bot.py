@@ -137,6 +137,8 @@ GAMES_IN_PROGRESS = "you have a game in progress"
 GAMES_NO_LABEL_MATCH = (
     "no words match those labels — try fewer filters or `/label` more words"
 )
+GAMES_CANCELLED = "🛑 game cancelled"
+GAMES_NOTHING_TO_CANCEL = "no game in progress"
 IRREGULARS_IN_PROGRESS = "you have an irregular-verbs game in progress"
 IRREGULARS_PROMPT_HINT = (
     'Reply with the past simple and past participle, e.g. "went / gone".'
@@ -288,7 +290,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Pick a game: Word → Translation, Translation → Word (vocab quiz, 1–10 rounds; optionally filter by a label spec, AND across tokens), or Irregular verbs (type the past simple + past participle, 1–10 rounds)"),
+    ("games", "Pick a game: Word → Translation, Translation → Word (vocab quiz, 1–10 rounds; optionally filter by a label spec, AND across tokens), or Irregular verbs (type the past simple + past participle, 1–10 rounds). /games cancel ends an in-flight game so a new one can start."),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -860,13 +862,24 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     assert conn is not None
     chat_id = update.effective_chat.id
+    spec_args = context.args or []
+    # /games cancel — must run BEFORE the in-progress short-circuit, otherwise
+    # GAMES_IN_PROGRESS would fire and the user could never cancel.
+    if len(spec_args) == 1 and spec_args[0].strip().lower() == "cancel":
+        had_game = chat_id in games or chat_id in irregulars
+        games.pop(chat_id, None)
+        irregulars.pop(chat_id, None)
+        pending_game_filters.pop(chat_id, None)
+        await update.message.reply_text(
+            GAMES_CANCELLED if had_game else GAMES_NOTHING_TO_CANCEL
+        )
+        return
     if chat_id in games:
         await update.message.reply_text(GAMES_IN_PROGRESS)
         return
     if chat_id in irregulars:
         await update.message.reply_text(IRREGULARS_IN_PROGRESS)
         return
-    spec_args = context.args or []
     if spec_args:
         try:
             names = vocab.parse_label_spec(spec_args)
