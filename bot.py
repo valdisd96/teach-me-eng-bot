@@ -269,7 +269,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("help", "Show this help message"),
     ("add", "Add a word or phrase to this chat's vocab"),
     ("remove", "Remove a word or phrase from vocab"),
-    ("list", "List vocab words (optionally filter by substring)"),
+    ("list", "List vocab words (optionally filter by a label spec, AND across tokens)"),
     ("import", "Bulk-import vocab from a CSV file (one word per row)"),
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
@@ -416,27 +416,41 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     assert conn is not None
     chat_id = update.effective_chat.id
-    needle = " ".join(context.args or []).strip() or None
-    rows = vocab.list_words(conn, chat_id, contains=needle)
-    if not rows:
-        msg = (
-            f"No words matching '{needle}'."
-            if needle
-            else "Your vocab is empty. Add words with /add <word>."
-        )
-        await update.message.reply_text(msg)
-        return
-    header = (
-        f"Vocab ({len(rows)})"
-        + (f" matching '{needle}'" if needle else "")
-        + ":"
-    )
-    scores = vocab.compute_scores(rows)
-    lines = [
-        f"• {r['text']} (seen {r['mention_count']}×, score {s})"
-        for r, s in zip(rows, scores)
-    ]
-    # Telegram message cap — truncate gracefully.
+    spec_args = context.args or []
+    if spec_args:
+        try:
+            names = vocab.parse_label_spec(spec_args)
+        except ValueError as e:
+            await update.message.reply_text(f"⚠️ {e}")
+            return
+        rows = vocab.words_matching_labels(conn, chat_id, names)
+        if not rows:
+            await update.message.reply_text("no words match those labels")
+            return
+        header = f"Vocab ({len(rows)}) matching {' '.join(names)}:"
+        scores = vocab.compute_scores(rows)
+        lines = [
+            f"• {r['text']} (seen {r['mention_count']}×, score {s})"
+            + (
+                f" — {', '.join(labels)}"
+                if (labels := vocab.labels_for_word(conn, r["id"]))
+                else ""
+            )
+            for r, s in zip(rows, scores)
+        ]
+    else:
+        rows = vocab.list_words(conn, chat_id)
+        if not rows:
+            await update.message.reply_text(
+                "Your vocab is empty. Add words with /add <word>."
+            )
+            return
+        header = f"Vocab ({len(rows)}):"
+        scores = vocab.compute_scores(rows)
+        lines = [
+            f"• {r['text']} (seen {r['mention_count']}×, score {s})"
+            for r, s in zip(rows, scores)
+        ]
     body = "\n".join(lines)
     if len(body) > MAX_MSG_LEN - len(header) - 32:
         body = body[: MAX_MSG_LEN - len(header) - 32] + "\n…"
