@@ -17,17 +17,43 @@ A [python-telegram-bot](https://python-telegram-bot.org) app talking to any Open
 | `/clear` | Resets the chat's LLM history. Vocab and settings untouched. |
 | `/add <word or phrase>` | Add a word to this chat's vocab. |
 | `/remove <word or phrase>` | Remove by exact match. |
-| `/list [substring]` | List vocab (least-mentioned first), optionally filtered. |
-| `/import` | Bulk-import from a CSV upload (5-min window, capped at 5000 rows / 1 MB). One word per row in the first column; optional `text` header. Existing words preserved; in-file duplicates skipped. FSRS state not imported. |
-| `/export` | Sends the chat's vocab back as `vocab-YYYY-MM-DD.csv`, alphabetical, with a `text` header. FSRS state not exported. |
+| `/list [<spec>...]` | List vocab (least-mentioned first). With one or more label tokens, restrict to words tagged with **all** of them (AND). See [Labels](#labels). |
+| `/import` | Bulk-import from a CSV upload (5-min window, capped at 5000 rows / 1 MB). Columns: `text` (required), optional `translation`, optional `labels` (`;`-separated names). The `text,translation,labels` header opts in to the three-column round-trip; bare-list and `text,translation` formats remain accepted. Existing words preserved; in-file duplicates skipped; label sets are merged additively. FSRS state not imported. |
+| `/export` | Sends the chat's vocab back as `vocab-YYYY-MM-DD.csv`, alphabetical, with a `text,translation,labels` header. The `labels` column lists each word's labels joined by `;`. FSRS state not exported. |
 | `/resetvocab` | Wipe vocabulary (with a confirm button). |
 | `/translate <text>` | Google-translates args (or replied message) into the chat's target language. Reverse-translates non-Latin input back to English. Inline `➕ Add to vocab` button on results ≤5 words. Bypasses the LLM. |
-| `/games` | Pick a vocab quiz from a 2-button menu: **Word → Translation** or **Translation → Word**. Either runs `min(10, vocab_size)` rounds with 4 inline buttons each (1 correct + 3 distractors); a tap edits the keyboard with ✅/❌ feedback and advances. Final message: `🎯 You scored X/N`. One game per chat at a time; in-memory only (a restart abandons in-flight games). Needs at least 4 translatable vocab rows. |
+| `/games [<spec>...]` | Pick a vocab quiz from a 2-button menu: **Word → Translation** or **Translation → Word**. With one or more label tokens, restrict the pool to words tagged with **all** of them (AND); see [Labels](#labels). Either runs `min(10, pool_size)` rounds with 4 inline buttons each (1 correct + 3 distractors); a tap edits the keyboard with ✅/❌ feedback and advances. Final message: `🎯 You scored X/N`. One game per chat at a time; in-memory only (a restart abandons in-flight games). Needs at least 4 translatable vocab rows in the pool. |
+| `/label <word> <spec>...` | Attach one or more labels to a vocab word. See [Labels](#labels). |
+| `/unlabel <word> <spec>...` | Detach the named labels from a vocab word. |
+| `/labels` | List every label in this chat with its attached-word count. |
+| `/focus [<spec>...]` | Sticky per-chat label spec that scopes scheduled pushes and the post-`❌ forgot` 🎮 button. `/focus pos:noun` sets it; `/focus clear` removes it; `/focus` echoes the current value. |
 | `/status` | Host diagnostics, vocab count, LLM endpoint health, short bench. |
 
 Plain (non-slash) messages hit the LLM with vocab injected into the system prompt as soft hints. Words that appear literally in the reply bump their `mention_count` and get freshness credit.
 
 Scheduled pushes send 1 short snippet using 1 vocab word in the chosen tone, with `✅ knew / ❌ forgot` buttons that apply FSRS `Good` / `Again`.
+
+---
+
+## Labels
+
+Labels are per-chat tags you attach to vocab words. They let you slice your vocabulary by topic, part of speech, or any other axis you invent — and then point `/list`, `/games`, and pushes at just that slice.
+
+**Spec syntax.** A label token is either a bare string (`medicine`, `travel`) or a `key:value` pair (`pos:noun`, `type:animal`). Tokens are stripped + lowercased; a token with internal whitespace, an empty key/value, or more than one colon is rejected with `⚠️ malformed label spec: …` and no writes happen.
+
+**Adding and removing.**
+
+- `/label <word> <spec>...` — attach one or more labels to a word. Lookup is case-insensitive (matches `/remove`). Re-applying an attached label is a no-op (`already attached: …`). Attaching `pos:*` to a word that already carries a different `pos:*` quietly replaces it — a word can only have one `pos:*` at a time.
+- `/unlabel <word> <spec>...` — detach the named labels. Unknown / unattached tokens are silently skipped.
+- `/labels` — list every label in the chat with its attached-word count, alphabetically.
+
+**Filters.** Three commands accept the same spec syntax as a filter; in every case the semantics are **AND across tokens** (words must carry every named label).
+
+- `/list <spec>...` — show only words matching the filter; each row also displays its labels.
+- `/games <spec>...` — restrict the quiz pool to matching words; the chosen filter survives the direction-picker tap. The pool still needs ≥4 translatable rows or the bot replies `no words match those labels — try fewer filters or /label more words`.
+- `/focus <spec>...` — **sticky** per-chat filter that scopes scheduled pushes and the **🎮 Play game** button under the `❌ forgot` explanation. `/focus clear` removes it; `/focus` with no args echoes the current setting. `/list` and `/games` are unaffected by `/focus` — they use only their own inline `<spec>`.
+
+**CSV round-trip.** Labels travel through `/import` and `/export` in a third column named `labels`, with names joined by `;` (semicolon — `,` is already the CSV delimiter). On import the labels for each row are validated with the same spec rules and merged additively into any existing labels for that word; multiple `pos:*` on a single row reject the row. See `/import` and `/export` above for the full column contract.
 
 ---
 

@@ -307,11 +307,15 @@ HELP_TEXT = (
     "/import (and grab a backup any time with /export). The bot sends short "
     "snippets using those words at random times inside your window.\n"
     "3. Tap ✅ knew / ❌ forgot on each push — ratings drive FSRS spaced "
-    "repetition so tougher words come back more often.\n\n"
+    "repetition so tougher words come back more often.\n"
+    "4. Optional: tag words with /label (e.g. `/label horse pos:noun "
+    "type:animal`) and slice the deck with /list, /games, or /focus.\n\n"
     "Plain (non-slash) messages chat with the model and will naturally reuse "
     "your vocab when it fits.\n\n"
     "*Commands*\n"
     + "\n".join(f"/{name} — {desc}" for name, desc in COMMANDS)
+    + "\n\nLabel syntax + filters: "
+    "https://github.com/valdisd96/teach-me-eng-bot#labels"
 )
 
 

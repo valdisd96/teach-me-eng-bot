@@ -108,7 +108,10 @@ _STEPS = [
 INTRO = "Let's configure your vocab agent.\n\n"
 DONE_MESSAGE = (
     "✅ All set. Add words with `/add <word>` and pushes will start "
-    "showing up in your active window."
+    "showing up in your active window.\n\n"
+    "Tip: tag words with `/label <word> pos:noun type:animal` to slice "
+    "your deck — `/list`, `/games`, and `/focus` all accept the same "
+    "label spec as a filter."
 )
 
 
