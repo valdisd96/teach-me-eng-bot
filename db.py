@@ -55,6 +55,24 @@ CREATE TABLE IF NOT EXISTS push_log (
     FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_push_log_chat ON push_log(chat_id);
+
+CREATE TABLE IF NOT EXISTS labels (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id  INTEGER NOT NULL,
+    name     TEXT    NOT NULL,
+    UNIQUE(chat_id, name),
+    FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_labels_chat ON labels(chat_id);
+
+CREATE TABLE IF NOT EXISTS word_labels (
+    word_id  INTEGER NOT NULL,
+    label_id INTEGER NOT NULL,
+    PRIMARY KEY(word_id, label_id),
+    FOREIGN KEY(word_id)  REFERENCES words(id)  ON DELETE CASCADE,
+    FOREIGN KEY(label_id) REFERENCES labels(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_word_labels_label ON word_labels(label_id);
 """
 
 
