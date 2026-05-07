@@ -61,6 +61,7 @@ Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are
 | `/label <word> <spec>...` | Attach one or more labels to a vocab word. Spec tokens are bare strings (`medicine`) or `key:value` (`pos:noun`, `type:animal`); each token is stripped + lowercased, duplicates are dropped, malformed tokens (`:`, `:foo`, `foo:`, `a:b:c`, internal whitespace) abort the call with a ⚠️ error and no writes. Word lookup is case-insensitive (matches `/remove`). Idempotent — re-applying an attached label replies `already attached: …` and inserts nothing. Attaching `pos:*` to a word that already has a different `pos:*` quietly replaces it; the reply names both, e.g. `horse: replaced pos:noun → pos:verb`. |
 | `/unlabel <word> <spec>...` | Detach the named labels from a word. Same spec syntax as `/label`. Tokens that aren't attached (or whose label doesn't exist) are silently skipped; reply lists the names actually removed, or `nothing to remove`. |
 | `/labels` | List every label in this chat with its attached-word count, alphabetically. Empty chat → `No labels yet.` Labels with no attached words still appear with `(0)`. |
+| `/focus [<spec>...]` | Sticky per-chat label spec that scopes scheduled **pushes** and the **🎮 Play game** button under the `❌ forgot` explanation. `/focus pos:noun type:medicine` stores the normalised tokens (same `key:value` / bare-string syntax as `/label`); `/focus clear` removes the focus; `/focus` with no args echoes the current setting (`current focus: …` or `no focus set`). The reply to a successful set includes the matching word count, or `⚠️ no words match yet` when the filter currently selects zero rows (still stored — AC5). When focus is set and a scheduled push tick finds zero matches, the bot logs and sends nothing (no Telegram error). `/games` and `/list` are unaffected — they use only their own inline `<spec>`. |
 | `/status` | Host diagnostics (hardware, OS, deployed commit short SHA, load, temp, disk free), vocab count for the chat, LLM endpoint/health, and a short model bench (chars + tok/s, `model not responding` on 30 s timeout). The deploy SHA is read from `/var/lib/teach-me-eng-bot/deploy.json` (written by the auto-deploy workflow); shows `unknown` when the manifest is missing. |
 
 Plain (non-slash) messages go through the **just-talk** flow: the chat history is passed to the model with the current vocab list injected into the system prompt as soft hints. Any vocab words that appear literally in the reply bump `mention_count` and update `last_used_at`.
@@ -100,7 +101,7 @@ Each factor lives in `[0, 1]`, lifted to `[1, 2]` so no single signal dominates.
 
 - Path: `data/vocab.db` (git-ignored). Created on first run.
 - Tables:
-  - `chats(chat_id PK, tz, pushes_per_day, active_start, active_end, tone, translate_target, created_at)`
+  - `chats(chat_id PK, tz, pushes_per_day, active_start, active_end, tone, translate_target, focus_spec, created_at)`
   - `words(id PK, chat_id FK, text, added_at, mention_count, last_used_at, stability, difficulty, state, step, due, reps, lapses, last_review, UNIQUE(chat_id, text))`
   - `push_log(id PK, chat_id, sent_at, tg_message_id, word_ids_json, rated)`
 - Cascade-delete: removing a chat drops its words and push_log entries.

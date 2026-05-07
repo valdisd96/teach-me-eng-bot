@@ -102,11 +102,16 @@ async def compose_push(
     chat_id: int,
     *,
     llm_chat: LlmChat,
+    names: list[str] | None = None,
     rng: random.Random | None = None,
     now: datetime.datetime | None = None,
     retries: int = 1,
 ) -> tuple[int, str, str] | None:
     """Select a word and prompt the LLM. Returns (word_id, word, text) or None.
+
+    `names`, when non-empty, restricts the candidate pool to words tagged with
+    all of those labels (AND, via `vocab.select_word`); a filter that yields
+    zero matches returns None — the caller logs and skips the push.
 
     Retries once if the word doesn't appear literally in the output. On final
     failure the text is returned anyway — rare with short vocab prompts and
@@ -117,7 +122,7 @@ async def compose_push(
     ).fetchone()
     if chat_row is None:
         return None
-    picked = vocab.select_word(conn, chat_id, rng=rng, now=now)
+    picked = vocab.select_word(conn, chat_id, names=names, rng=rng, now=now)
     if picked is None:
         return None
 
