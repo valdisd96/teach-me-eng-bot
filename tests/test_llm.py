@@ -188,6 +188,95 @@ def test_chat_openrouter_posts_with_bearer_and_model(
     assert captured_request["body"]["model"] == llm.DEFAULT_OPENROUTER_MODEL
 
 
+# chat() disable_reasoning kwarg ---------------------------------------
+
+
+def test_chat_default_body_omits_reasoning_key(
+    clean_env: pytest.MonkeyPatch,
+    captured_request: dict,
+) -> None:  # AC1 — default kwargs => no "reasoning" key
+    asyncio.run(llm.chat([{"role": "user", "content": "hi"}]))
+    assert "reasoning" not in captured_request["body"], (
+        "AC1 — default chat() must NOT carry a 'reasoning' key on the wire; "
+        f"got body={captured_request['body']!r}"
+    )
+
+
+def test_chat_disable_reasoning_sets_reasoning_enabled_false(
+    clean_env: pytest.MonkeyPatch,
+    captured_request: dict,
+) -> None:  # AC2 — disable_reasoning=True adds reasoning: {enabled: False}
+    asyncio.run(
+        llm.chat([{"role": "user", "content": "hi"}], disable_reasoning=True)
+    )
+    assert captured_request["body"].get("reasoning") == {"enabled": False}, (
+        "AC2 — disable_reasoning=True must place reasoning={'enabled': False} on "
+        f"the wire; got {captured_request['body'].get('reasoning')!r}"
+    )
+
+
+def test_chat_disable_reasoning_preserves_default_body_shape(
+    clean_env: pytest.MonkeyPatch,
+    captured_request: dict,
+) -> None:  # AC2 — body still carries model/messages/max_tokens/temperature/stream
+    msgs = [{"role": "user", "content": "hi"}]
+    asyncio.run(llm.chat(msgs, disable_reasoning=True))
+    body = captured_request["body"]
+    assert body["model"] == llm.MODEL, f"model lost from body; got {body!r}"
+    assert body["messages"] == msgs, f"messages lost from body; got {body!r}"
+    assert body["max_tokens"] == 256, f"default max_tokens lost; got {body!r}"
+    assert body["temperature"] == 0.8, f"default temperature lost; got {body!r}"
+    assert body["stream"] is False, f"stream flag lost; got {body!r}"
+
+
+def test_chat_default_body_byte_identical_to_explicit_false(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # edge: disable_reasoning=False default is byte-identical to current
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content) if request.content else {})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "ok"}}]}
+        )
+
+    transport = httpx.MockTransport(handler)
+    real = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+    msgs = [{"role": "user", "content": "hi"}]
+    asyncio.run(llm.chat(msgs))
+    asyncio.run(llm.chat(msgs, disable_reasoning=False))
+    assert bodies[0] == bodies[1], (
+        "edge — default kwargs and disable_reasoning=False must produce "
+        f"byte-identical bodies; default={bodies[0]!r}, explicit={bodies[1]!r}"
+    )
+
+
+def test_chat_disable_reasoning_works_on_llama_backend(
+    clean_env: pytest.MonkeyPatch,
+    captured_request: dict,
+) -> None:  # edge: llama.cpp backend accepts the unknown reasoning field
+    # Default backend is llama.cpp (clean_env wipes LLM_BACKEND).
+    asyncio.run(
+        llm.chat([{"role": "user", "content": "hi"}], disable_reasoning=True)
+    )
+    assert captured_request["url"] == llm.LLAMA_URL, (
+        f"clean_env should keep llama.cpp default; got {captured_request['url']!r}"
+    )
+    assert captured_request["body"].get("reasoning") == {"enabled": False}, (
+        "edge — reasoning field must be present even on the llama.cpp backend "
+        "(server is expected to ignore unknown fields); got "
+        f"{captured_request['body'].get('reasoning')!r}"
+    )
+
+
 # stream_chat() request shape -------------------------------------------
 
 
