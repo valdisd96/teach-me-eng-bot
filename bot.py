@@ -44,6 +44,7 @@ from telegram.request import HTTPXRequest
 import config_flow
 import db as db_module
 import games as games_module
+import irregular_verbs as irregular_module
 import llm
 import prompts
 import scheduler as sched_module
@@ -125,9 +126,15 @@ import_pending: dict[int, float] = {}
 # In-flight /games sessions: at most one per chat (AC8). Cleared on completion
 # and on bot restart — game state is intentionally not persisted.
 games: dict[int, games_module.Game] = {}
+# In-flight /irregulars sessions: same one-per-chat semantics as `games`.
+irregulars: dict[int, irregular_module.Game] = {}
 
 GAMES_NEED_VOCAB = "add at least 4 words to your vocab first"
 GAMES_IN_PROGRESS = "you have a game in progress"
+IRREGULARS_IN_PROGRESS = "you have an irregular-verbs game in progress"
+IRREGULARS_PROMPT_HINT = (
+    'Reply with the past simple and past participle, e.g. "went / gone".'
+)
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -268,6 +275,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
     ("games", "Play a vocab quiz (Word → Translation or Translation → Word, 1–10 rounds)"),
+    ("irregulars", "Practise irregular verbs — type the past simple + past participle (1–10 rounds)"),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -761,6 +769,30 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Pick a game:", reply_markup=kb)
 
 
+# --- /irregulars ------------------------------------------------------------
+
+
+def _format_irregular_prompt(game: irregular_module.Game) -> str:
+    rd = game.current()
+    return (
+        f"Round {game.current_round + 1}/{game.n_rounds}: {rd.base}\n"
+        f"{IRREGULARS_PROMPT_HINT}"
+    )
+
+
+async def cmd_irregulars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if chat_id in irregulars:
+        await update.message.reply_text(IRREGULARS_IN_PROGRESS)
+        return
+    rounds = irregular_module.draw_rounds(rng=random.Random())
+    game = irregular_module.Game(chat_id=chat_id, rounds=rounds)
+    irregulars[chat_id] = game
+    await update.message.reply_text(_format_irregular_prompt(game))
+
+
 # --- callback handlers ------------------------------------------------------
 
 
@@ -1031,7 +1063,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(reply)
         return
 
-    # Branch 2: just-talk. Inject vocab words into the system prompt so the
+    # Branch 2: irregular-verbs game in progress — interpret plain text as the
+    # round answer.
+    irr_game = irregulars.get(chat_id)
+    if irr_game is not None and not irr_game.done:
+        rd = irr_game.current()
+        correct, parsed = irregular_module.grade_answer(user_text, rd)
+        canonical = (
+            f"{rd.past_simple_alts[0]} / {rd.past_participle_alts[0]}"
+        )
+        if parsed is None:
+            await update.message.reply_text(
+                f"⚠️ {IRREGULARS_PROMPT_HINT}"
+            )
+            return
+        if correct:
+            reply = f"✅ {parsed}"
+        else:
+            reply = f"❌ {parsed} — correct: {canonical}"
+        irregular_module.apply_answer(irr_game, correct)
+        await update.message.reply_text(reply)
+        if irr_game.done:
+            await update.message.reply_text(
+                irregular_module.format_result(irr_game.score, irr_game.n_rounds)
+            )
+            irregulars.pop(chat_id, None)
+        else:
+            await update.message.reply_text(_format_irregular_prompt(irr_game))
+        return
+
+    # Branch 3: just-talk. Inject vocab words into the system prompt so the
     # model uses them when they fit naturally; scan the reply afterwards to
     # bump mention_count.
     vocab_rows = vocab.list_words(conn, chat_id)
@@ -1161,6 +1222,7 @@ def main() -> None:
     app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
     app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(CommandHandler("games", cmd_games))
+    app.add_handler(CommandHandler("irregulars", cmd_irregulars))
     app.add_handler(CommandHandler("label", cmd_label))
     app.add_handler(CommandHandler("unlabel", cmd_unlabel))
     app.add_handler(CommandHandler("labels", cmd_labels))
