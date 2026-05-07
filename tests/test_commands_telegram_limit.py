@@ -103,9 +103,27 @@ def test_non_games_entries_byte_for_byte_unchanged() -> None:  # AC5 — drive-b
     )
 
 
-def test_commands_names_and_ordering_preserved() -> None:  # AC5 / Public API — same names, same order
+def test_commands_names_and_ordering_preserved() -> None:  # AC7 — documented order preserved
     actual_names = [name for name, _ in bot.COMMANDS]
     assert actual_names == EXPECTED_NAMES_IN_ORDER, (
-        "Public API: COMMANDS must retain the same names in the same order; "
+        f"AC7: COMMANDS names must appear in the documented order; "
         f"expected {EXPECTED_NAMES_IN_ORDER}, got {actual_names}"
     )
+
+
+def test_games_description_is_pure_ascii() -> None:  # AC6 — pure-ASCII drift guard
+    """The /games description must be pure ASCII so future char/byte counts agree.
+
+    Non-ASCII glyphs (e.g. `→`, `–`, em-dash, accents) cost multiple UTF-8 bytes
+    each and silently inflate the wire-level byte length past 256 even when the
+    code-point count looks safe — exactly how #110 happened. Locking the string
+    to ASCII makes len(desc) and len(desc.encode("utf-8")) coincide.
+    """
+    desc = _games_desc()
+    try:
+        desc.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise AssertionError(
+            f"AC6: /games description must be pure ASCII; non-ASCII char at offset "
+            f"{exc.start}..{exc.end} ({desc[exc.start:exc.end]!r}); full desc: {desc!r}"
+        ) from None
