@@ -288,8 +288,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Play a vocab quiz (Word → Translation or Translation → Word, 1–10 rounds; optionally filter by a label spec, AND across tokens)"),
-    ("irregulars", "Practise irregular verbs — type the past simple + past participle (1–10 rounds)"),
+    ("games", "Pick a game: Word → Translation, Translation → Word (vocab quiz, 1–10 rounds; optionally filter by a label spec, AND across tokens), or Irregular verbs (type the past simple + past participle, 1–10 rounds)"),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -864,6 +863,9 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if chat_id in games:
         await update.message.reply_text(GAMES_IN_PROGRESS)
         return
+    if chat_id in irregulars:
+        await update.message.reply_text(IRREGULARS_IN_PROGRESS)
+        return
     spec_args = context.args or []
     if spec_args:
         try:
@@ -875,19 +877,26 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(GAMES_NO_LABEL_MATCH)
             return
         pending_game_filters[chat_id] = names
+        # With a spec, the picker is vocab-only — the spec is meaningless
+        # for the static irregular-verb deck.
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
+            InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
+        ]])
     else:
-        if len(_playable_rows(conn, chat_id)) < games_module.MIN_VOCAB:
-            await update.message.reply_text(GAMES_NEED_VOCAB)
-            return
         pending_game_filters.pop(chat_id, None)
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
-        InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
-    ]])
+        rows = [
+            [InlineKeyboardButton("Irregular verbs", callback_data="gm:irr")],
+        ]
+        # Vocab buttons only when there's enough translatable vocab to play —
+        # otherwise the irregular verbs game stays reachable from the same picker.
+        if len(_playable_rows(conn, chat_id)) >= games_module.MIN_VOCAB:
+            rows.insert(0, [
+                InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
+                InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
+            ])
+        kb = InlineKeyboardMarkup(rows)
     await update.message.reply_text("Pick a game:", reply_markup=kb)
-
-
-# --- /irregulars ------------------------------------------------------------
 
 
 def _format_irregular_prompt(game: irregular_module.Game) -> str:
@@ -896,19 +905,6 @@ def _format_irregular_prompt(game: irregular_module.Game) -> str:
         f"Round {game.current_round + 1}/{game.n_rounds}: {rd.base}\n"
         f"{IRREGULARS_PROMPT_HINT}"
     )
-
-
-async def cmd_irregulars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update):
-        return
-    chat_id = update.effective_chat.id
-    if chat_id in irregulars:
-        await update.message.reply_text(IRREGULARS_IN_PROGRESS)
-        return
-    rounds = irregular_module.draw_rounds(rng=random.Random())
-    game = irregular_module.Game(chat_id=chat_id, rounds=rounds)
-    irregulars[chat_id] = game
-    await update.message.reply_text(_format_irregular_prompt(game))
 
 
 # --- callback handlers ------------------------------------------------------
@@ -1058,6 +1054,18 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
+    if query.data == "gm:irr":
+        if chat_id in games:
+            await query.message.reply_text(GAMES_IN_PROGRESS)
+            return
+        if chat_id in irregulars:
+            await query.message.reply_text(IRREGULARS_IN_PROGRESS)
+            return
+        rounds = irregular_module.draw_rounds(rng=random.Random())
+        game = irregular_module.Game(chat_id=chat_id, rounds=rounds)
+        irregulars[chat_id] = game
+        await query.message.reply_text(_format_irregular_prompt(game))
+        return
     if query.data == "gm:wt":
         direction = "wt"
     elif query.data == "gm:tw":
@@ -1354,7 +1362,6 @@ def main() -> None:
     app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
     app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(CommandHandler("games", cmd_games))
-    app.add_handler(CommandHandler("irregulars", cmd_irregulars))
     app.add_handler(CommandHandler("label", cmd_label))
     app.add_handler(CommandHandler("unlabel", cmd_unlabel))
     app.add_handler(CommandHandler("labels", cmd_labels))
