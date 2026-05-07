@@ -483,6 +483,8 @@ async def cmd_import(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "• Optional second column `translation` is honoured when the header "
         "is `text,translation`; missing translations get backfilled "
         "automatically on next start.\n"
+        "• Optional third column `labels` (header `text,translation,labels`) "
+        "is a `;`-separated list of label names — round-trips with /export.\n"
         "• A bare `text` header (or no header) still works.\n"
         "• Existing words are kept; duplicates are skipped.\n"
         f"(Times out in {int(IMPORT_PENDING_TTL // 60)} minutes; "
@@ -501,7 +503,10 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "Your vocab is empty. Add words with /add or /import."
         )
         return
-    csv_text = vocab.format_csv([(r["text"], r["translation"]) for r in rows])
+    label_map = vocab.labels_for_words_in_chat(conn, chat_id)
+    csv_text = vocab.format_csv(
+        [(r["text"], r["translation"], label_map.get(r["id"], [])) for r in rows]
+    )
     today = datetime.date.today().isoformat()
     filename = f"vocab-{today}.csv"
     await update.message.reply_document(
@@ -550,28 +555,39 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"⚠️ Could not decode file as UTF-8: {e}")
         return
     try:
-        pairs = vocab.parse_csv_words(text)
+        triples = vocab.parse_csv_words(text)
     except csv.Error as e:
         await update.message.reply_text(f"⚠️ Could not parse CSV: {e}")
         return
-    if not pairs:
+    if not triples:
         await update.message.reply_text("No words found in the file.")
         return
-    if len(pairs) > IMPORT_MAX_ROWS:
+    if len(triples) > IMPORT_MAX_ROWS:
         await update.message.reply_text(
-            f"⚠️ Too many rows ({len(pairs)}; max {IMPORT_MAX_ROWS})."
+            f"⚠️ Too many rows ({len(triples)}; max {IMPORT_MAX_ROWS})."
         )
         return
-    words = [w for w, _ in pairs]
-    translations = [t for _, t in pairs]
-    counts = vocab.add_words_bulk(conn, chat_id, words, translations=translations)
+    counts = vocab.import_rows(conn, chat_id, triples)
     parts = [
         f"added: {counts['added']}",
         f"skipped (duplicate): {counts['skipped']}",
     ]
     if counts["invalid"]:
         parts.append(f"skipped (empty): {counts['invalid']}")
-    await update.message.reply_text("Imported. " + ", ".join(parts) + ".")
+    if counts["rejected"]:
+        parts.append(f"rejected (labels): {counts['rejected']}")
+    reply = "Imported. " + ", ".join(parts) + "."
+    label_errors = counts["label_errors"]
+    if label_errors:
+        shown = label_errors[:3]
+        detail = "; ".join(f"row {idx}: {msg}" for idx, msg in shown)
+        more = (
+            f" (+{len(label_errors) - len(shown)} more)"
+            if len(label_errors) > len(shown)
+            else ""
+        )
+        reply += f"\nLabel errors — {detail}{more}"
+    await update.message.reply_text(reply)
 
 
 async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
