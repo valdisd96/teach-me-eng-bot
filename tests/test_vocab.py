@@ -931,3 +931,124 @@ def test_words_matching_labels_empty_returns_all_in_list_words_order(
     assert "other_chat_word" not in matched, (
         "rows must scope to chat_id; other chat's word leaked"
     )
+
+
+# --- parse_label_spec (issue #83) ------------------------------------------
+
+
+def test_parse_label_spec_keyvalue_tokens() -> None:  # AC4 — example ["pos:noun","type:medicine"]
+    out = vocab.parse_label_spec(["pos:noun", "type:medicine"])
+    assert out == ["pos:noun", "type:medicine"], f"got {out!r}"
+
+
+def test_parse_label_spec_bare_string_token() -> None:  # AC4 — bare-string tokens accepted
+    out = vocab.parse_label_spec(["medicine"])
+    assert out == ["medicine"], f"got {out!r}"
+
+
+def test_parse_label_spec_dedupes_case_normalized() -> None:  # AC4 — example ["medicine","Medicine"] → ["medicine"]
+    out = vocab.parse_label_spec(["medicine", "Medicine"])
+    assert out == ["medicine"], f"got {out!r}"
+
+
+def test_parse_label_spec_strips_and_lowercases() -> None:  # AC4 — strip + lowercase per token
+    out = vocab.parse_label_spec(["  Pos:Noun  ", "TYPE:Medicine"])
+    assert out == ["pos:noun", "type:medicine"], f"got {out!r}"
+
+
+def test_parse_label_spec_preserves_first_seen_order() -> None:  # AC4 — first-seen order across dedupes
+    out = vocab.parse_label_spec(["zeta", "alpha", "ZETA", "alpha", "beta"])
+    assert out == ["zeta", "alpha", "beta"], (
+        f"first-seen order must be preserved; got {out!r}"
+    )
+
+
+def test_parse_label_spec_empty_input_returns_empty_list() -> None:  # edge — empty list
+    assert vocab.parse_label_spec([]) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",            # empty token
+        "   ",         # whitespace-only token (strips to empty)
+        "foo bar",     # internal whitespace in bare-string
+        "pos: noun",   # internal whitespace inside a key:value
+        ":",           # only colon
+        ":foo",        # empty key
+        "foo:",        # empty value
+        "a:b:c",       # >1 colon
+    ],
+)
+def test_parse_label_spec_rejects_malformed_token(bad: str) -> None:  # AC4 — every malformed shape rejects
+    with pytest.raises(ValueError) as excinfo:
+        vocab.parse_label_spec([bad])
+    assert "malformed label spec" in str(excinfo.value), (
+        f"error message should reference malformed-label-spec; got {excinfo.value!r}"
+    )
+
+
+def test_parse_label_spec_error_message_starts_with_prefix() -> None:  # AC4 — message starts "malformed label spec: "
+    with pytest.raises(ValueError) as excinfo:
+        vocab.parse_label_spec([":foo"])
+    msg = str(excinfo.value)
+    assert msg.startswith("malformed label spec: "), (
+        f"message must start with the documented prefix; got {msg!r}"
+    )
+
+
+def test_parse_label_spec_error_lists_every_offender() -> None:  # AC4 — every bad token listed in the error
+    with pytest.raises(ValueError) as excinfo:
+        # Mix two distinct offenders along with one valid token; only bad ones must surface in the error.
+        vocab.parse_label_spec(["pos:noun", ":foo", "a:b:c"])
+    msg = str(excinfo.value)
+    assert ":foo" in msg, f"first offender ':foo' must be in error msg; got {msg!r}"
+    assert "a:b:c" in msg, f"second offender 'a:b:c' must be in error msg; got {msg!r}"
+
+
+def test_parse_label_spec_mixed_valid_and_malformed_rejects_all() -> None:  # edge — mixed input → reject all (no partial pass)
+    # Even one bad token → ValueError. The valid token must NOT come back as a partial result.
+    with pytest.raises(ValueError):
+        vocab.parse_label_spec(["pos:noun", ":foo"])
+
+
+# --- find_word_id (issue #83) ----------------------------------------------
+
+
+def test_find_word_id_returns_id_for_existing(conn: sqlite3.Connection) -> None:  # AC6 — match (chat_id, _normalize(text))
+    vocab.add_word(conn, CHAT, "horse")
+    expected = _word_id(conn, CHAT, "horse")
+    assert vocab.find_word_id(conn, CHAT, "horse") == expected
+
+
+def test_find_word_id_normalizes_input(conn: sqlite3.Connection) -> None:  # AC6 — strip + lowercase
+    vocab.add_word(conn, CHAT, "horse")
+    expected = _word_id(conn, CHAT, "horse")
+    assert vocab.find_word_id(conn, CHAT, "  Horse  ") == expected, (
+        "lookup should _normalize the text the same way add_word does"
+    )
+    assert vocab.find_word_id(conn, CHAT, "HORSE") == expected
+
+
+def test_find_word_id_returns_none_for_missing(conn: sqlite3.Connection) -> None:  # AC6 — no match → None
+    vocab.ensure_chat(conn, CHAT)
+    assert vocab.find_word_id(conn, CHAT, "ghost") is None
+
+
+def test_find_word_id_returns_none_for_empty_text(conn: sqlite3.Connection) -> None:  # AC6 — empty after _normalize → None
+    vocab.ensure_chat(conn, CHAT)
+    assert vocab.find_word_id(conn, CHAT, "") is None
+    assert vocab.find_word_id(conn, CHAT, "   ") is None, (
+        "whitespace-only text normalizes to empty and must return None"
+    )
+
+
+def test_find_word_id_scopes_to_chat(conn: sqlite3.Connection) -> None:  # AC6 — chat_id scopes the lookup
+    vocab.add_word(conn, CHAT, "horse")
+    vocab.add_word(conn, CHAT + 1, "horse")
+    a = vocab.find_word_id(conn, CHAT, "horse")
+    b = vocab.find_word_id(conn, CHAT + 1, "horse")
+    assert a is not None and b is not None
+    assert a != b, f"per-chat rows must yield distinct ids; got {a} vs {b}"
+    # Lookup in a third chat returns None even though other chats have the word.
+    assert vocab.find_word_id(conn, CHAT + 999, "horse") is None

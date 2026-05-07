@@ -268,6 +268,9 @@ COMMANDS: list[tuple[str, str]] = [
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
     ("games", "Play a vocab quiz (Word → Translation or Translation → Word, 1–10 rounds)"),
+    ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
+    ("unlabel", "Detach labels from a vocab word"),
+    ("labels", "List every label in this chat with its attached-word count"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -599,6 +602,110 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [[InlineKeyboardButton("➕ Add to vocab", callback_data=f"av:{token}")]]
     )
     await update.message.reply_text(translated, reply_markup=kb, do_quote=True)
+
+
+async def cmd_label(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /label <word> <spec> [<spec> ...]"
+        )
+        return
+    word_arg, spec_args = args[0], args[1:]
+    try:
+        names = vocab.parse_label_spec(spec_args)
+    except ValueError as e:
+        await update.message.reply_text(f"⚠️ {e}")
+        return
+    word_id = vocab.find_word_id(conn, chat_id, word_arg)
+    normalized_word = word_arg.strip().lower()
+    if word_id is None:
+        await update.message.reply_text(f"Not found: {normalized_word}")
+        return
+
+    before = vocab.labels_for_word(conn, word_id)
+    before_set = set(before)
+    before_pos = next(
+        (n for n in before if n.startswith(vocab.POS_PREFIX)), None
+    )
+    for name in names:
+        lid = vocab.get_or_create_label(conn, chat_id, name)
+        vocab.attach_label(conn, word_id, lid)
+    after = vocab.labels_for_word(conn, word_id)
+    after_set = set(after)
+    after_pos = next(
+        (n for n in after if n.startswith(vocab.POS_PREFIX)), None
+    )
+
+    parts: list[str] = []
+    swap_target: str | None = None
+    if before_pos and after_pos and before_pos != after_pos:
+        parts.append(f"replaced {before_pos} → {after_pos}")
+        swap_target = after_pos
+    truly_added = sorted(
+        n for n in after_set - before_set if n != swap_target
+    )
+    if truly_added:
+        parts.append("added: " + ", ".join(truly_added))
+    if not parts:
+        parts.append("already attached: " + ", ".join(names))
+    await update.message.reply_text(f"{normalized_word}: " + "; ".join(parts))
+
+
+async def cmd_unlabel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /unlabel <word> <spec> [<spec> ...]"
+        )
+        return
+    word_arg, spec_args = args[0], args[1:]
+    try:
+        names = vocab.parse_label_spec(spec_args)
+    except ValueError as e:
+        await update.message.reply_text(f"⚠️ {e}")
+        return
+    word_id = vocab.find_word_id(conn, chat_id, word_arg)
+    normalized_word = word_arg.strip().lower()
+    if word_id is None:
+        await update.message.reply_text(f"Not found: {normalized_word}")
+        return
+
+    detached: list[str] = []
+    for name in names:
+        lid = vocab.find_label_id(conn, chat_id, name)
+        if lid is None:
+            continue
+        if vocab.detach_label(conn, word_id, lid):
+            detached.append(name)
+    if detached:
+        msg = "removed: " + ", ".join(sorted(detached))
+    else:
+        msg = "nothing to remove"
+    await update.message.reply_text(f"{normalized_word}: {msg}")
+
+
+async def cmd_labels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    rows = vocab.labels_with_counts(conn, chat_id)
+    if not rows:
+        await update.message.reply_text(
+            "No labels yet. Use /label <word> <spec>… to add some."
+        )
+        return
+    body = "\n".join(f"• {name} ({n})" for name, n in rows)
+    await update.message.reply_text(f"Labels:\n{body}")
 
 
 async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1054,6 +1161,9 @@ def main() -> None:
     app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
     app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(CommandHandler("games", cmd_games))
+    app.add_handler(CommandHandler("label", cmd_label))
+    app.add_handler(CommandHandler("unlabel", cmd_unlabel))
+    app.add_handler(CommandHandler("labels", cmd_labels))
 
     app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))

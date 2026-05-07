@@ -481,6 +481,57 @@ def select_word(
 POS_PREFIX = "pos:"
 
 
+def parse_label_spec(args: list[str]) -> list[str]:
+    """Tokenise a Telegram-args list into normalised label names.
+
+    Each token is stripped and lowercased. A token is valid if it is either a
+    bare string (`medicine`) or `key:value` (`pos:noun`). Order is preserved
+    and duplicates are dropped (first occurrence wins). Raises `ValueError`
+    listing every offending raw token if any token is empty, has internal
+    whitespace, or has an empty key/value or more than one colon.
+
+    Shared by `/label`, `/unlabel`, and the upcoming `/list`, `/games`,
+    `/focus` filter wirings — single source of truth for the spec format.
+    """
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    bad: list[str] = []
+    for raw in args:
+        token = raw.strip().lower()
+        if not token or any(c.isspace() for c in token):
+            bad.append(raw)
+            continue
+        parts = token.split(":")
+        if len(parts) > 2 or any(p == "" for p in parts):
+            bad.append(raw)
+            continue
+        if token in seen_set:
+            continue
+        seen.append(token)
+        seen_set.add(token)
+    if bad:
+        raise ValueError("malformed label spec: " + " ".join(bad))
+    return seen
+
+
+def find_word_id(
+    conn: sqlite3.Connection, chat_id: int, text: str
+) -> int | None:
+    """Return `words.id` for `(chat_id, _normalize(text))`, or None.
+
+    Mirrors `/remove`'s case-insensitive lookup so `/label`/`/unlabel` accept
+    the same forms users already type.
+    """
+    word = _normalize(text)
+    if not word:
+        return None
+    row = conn.execute(
+        "SELECT id FROM words WHERE chat_id = ? AND text = ?",
+        (chat_id, word),
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def get_or_create_label(conn: sqlite3.Connection, chat_id: int, name: str) -> int:
     """Return the id of `(chat_id, name)`, inserting the row if needed.
 
@@ -556,6 +607,37 @@ def labels_for_word(conn: sqlite3.Connection, word_id: int) -> list[str]:
         (word_id,),
     ).fetchall()
     return [r["name"] for r in rows]
+
+
+def labels_with_counts(
+    conn: sqlite3.Connection, chat_id: int
+) -> list[tuple[str, int]]:
+    """All labels for `chat_id` paired with their attached-word count.
+
+    Sorted alphabetically by name; labels with no attached words still appear
+    with count 0 (LEFT JOIN).
+    """
+    rows = conn.execute(
+        "SELECT l.name AS name, COUNT(wl.word_id) AS n "
+        "FROM labels l "
+        "LEFT JOIN word_labels wl ON wl.label_id = l.id "
+        "WHERE l.chat_id = ? "
+        "GROUP BY l.id "
+        "ORDER BY l.name ASC",
+        (chat_id,),
+    ).fetchall()
+    return [(r["name"], r["n"]) for r in rows]
+
+
+def find_label_id(
+    conn: sqlite3.Connection, chat_id: int, name: str
+) -> int | None:
+    """Return `labels.id` for `(chat_id, name)` or None — never inserts."""
+    row = conn.execute(
+        "SELECT id FROM labels WHERE chat_id = ? AND name = ?",
+        (chat_id, name),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def words_matching_labels(
