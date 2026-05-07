@@ -226,15 +226,23 @@ def split_point(text: str, max_len: int) -> int:
 async def dispatch_push(chat_id: int) -> None:
     """Compose a scheduled push and send it with rating buttons."""
     assert conn is not None and app is not None
+    focus_text = vocab.get_focus_spec(conn, chat_id)
+    names = focus_text.split() if focus_text else None
     try:
         composed = await sched_module.compose_push(
-            conn, chat_id, llm_chat=llm.chat, rng=random.Random()
+            conn, chat_id, llm_chat=llm.chat, names=names, rng=random.Random()
         )
     except Exception as e:  # noqa: BLE001 — never let a push crash the scheduler
         log.error("compose_push failed for chat %s: %s", chat_id, e)
         return
     if composed is None:
-        log.info("No push for chat %s (no vocab or chat missing)", chat_id)
+        if names:
+            log.info(
+                "No push for chat %s (focus %r matched zero words)",
+                chat_id, focus_text,
+            )
+        else:
+            log.info("No push for chat %s (no vocab or chat missing)", chat_id)
         return
     word_id, word, text = composed
 
@@ -285,6 +293,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
+    ("focus", "Set a sticky label spec scoping pushes + post-/forgot game button (e.g. /focus pos:noun); /focus clear removes it; /focus echoes current"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -736,6 +745,53 @@ async def cmd_labels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"Labels:\n{body}")
 
 
+async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set, clear, or echo the chat's sticky focus spec.
+
+    Three forms:
+      * `/focus`                  → echo current focus or "no focus set".
+      * `/focus clear`            → clear the focus (column → NULL).
+      * `/focus pos:noun ...`     → store the normalised spec for pushes
+                                    and the post-`❌ forgot` 🎮 button.
+    """
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+    args = context.args or []
+
+    if not args:
+        current = vocab.get_focus_spec(conn, chat_id)
+        await update.message.reply_text(
+            f"current focus: {current}" if current else "no focus set"
+        )
+        return
+
+    if len(args) == 1 and args[0].strip().lower() == "clear":
+        vocab.set_focus_spec(conn, chat_id, None)
+        await update.message.reply_text("focus cleared")
+        return
+
+    try:
+        names = vocab.parse_label_spec(args)
+    except ValueError as e:
+        await update.message.reply_text(f"⚠️ {e}")
+        return
+
+    spec_text = " ".join(names)
+    vocab.set_focus_spec(conn, chat_id, spec_text)
+    matches = vocab.words_matching_labels(conn, chat_id, names)
+    if not matches:
+        await update.message.reply_text(
+            f"focus set: {spec_text}\n⚠️ no words match yet"
+        )
+    else:
+        await update.message.reply_text(
+            f"focus set: {spec_text} ({len(matches)} word"
+            f"{'s' if len(matches) != 1 else ''})"
+        )
+
+
 async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
@@ -1010,7 +1066,9 @@ async def on_play_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Open the games direction-picker from the ❌-forgot explanation reply.
 
     Mirrors `cmd_games`'s gates (in-progress, MIN_VOCAB) and posts the same
-    `gm:wt` / `gm:tw` menu, so existing handlers run the rounds.
+    `gm:wt` / `gm:tw` menu. When the chat has a sticky `/focus` set, its
+    names are seeded into `pending_game_filters` so the round draw uses the
+    same restricted pool that pushes use.
     """
     if not is_allowed(update):
         return
@@ -1021,10 +1079,17 @@ async def on_play_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if chat_id in games:
         await query.message.reply_text(GAMES_IN_PROGRESS)
         return
-    if len(_playable_rows(conn, chat_id)) < games_module.MIN_VOCAB:
-        await query.message.reply_text(GAMES_NEED_VOCAB)
+    focus_text = vocab.get_focus_spec(conn, chat_id)
+    names = focus_text.split() if focus_text else None
+    if len(_playable_rows(conn, chat_id, names)) < games_module.MIN_VOCAB:
+        await query.message.reply_text(
+            GAMES_NO_LABEL_MATCH if names else GAMES_NEED_VOCAB
+        )
         return
-    pending_game_filters.pop(chat_id, None)
+    if names:
+        pending_game_filters[chat_id] = names
+    else:
+        pending_game_filters.pop(chat_id, None)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
         InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
@@ -1273,6 +1338,7 @@ def main() -> None:
     app.add_handler(CommandHandler("label", cmd_label))
     app.add_handler(CommandHandler("unlabel", cmd_unlabel))
     app.add_handler(CommandHandler("labels", cmd_labels))
+    app.add_handler(CommandHandler("focus", cmd_focus))
 
     app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))

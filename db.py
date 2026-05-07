@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS chats (
     active_end       TEXT    NOT NULL DEFAULT '21:00',
     tone             TEXT    NOT NULL DEFAULT 'mixed',
     translate_target TEXT    NOT NULL DEFAULT 'ru',
+    focus_spec       TEXT,
     created_at       TEXT    NOT NULL
 );
 
@@ -108,3 +109,6 @@ def init_db(conn: sqlite3.Connection) -> None:
     if "translation" not in _column_names(conn, "words"):
         # NULL means "not yet translated" — backfilled by the startup sweep.
         conn.execute("ALTER TABLE words ADD COLUMN translation TEXT")
+    if "focus_spec" not in _column_names(conn, "chats"):
+        # NULL means "no focus" — set via /focus, cleared via /focus clear.
+        conn.execute("ALTER TABLE chats ADD COLUMN focus_spec TEXT")

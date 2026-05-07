@@ -461,14 +461,24 @@ def select_word(
     conn: sqlite3.Connection,
     chat_id: int,
     *,
+    names: list[str] | None = None,
     rng: random.Random | None = None,
     now: datetime.datetime | None = None,
 ) -> sqlite3.Row | None:
-    """Sample one word for this chat using the weighted formula. None if empty."""
+    """Sample one word for this chat using the weighted formula. None if empty.
+
+    When `names` is non-empty, the candidate pool is restricted to words
+    tagged with **all** of those label names (AND semantics, via
+    `words_matching_labels`). An empty list or None preserves the unfiltered
+    pool.
+    """
     now = now or _now_dt()
-    rows = conn.execute(
-        "SELECT * FROM words WHERE chat_id = ?", (chat_id,)
-    ).fetchall()
+    if names:
+        rows = words_matching_labels(conn, chat_id, names)
+    else:
+        rows = conn.execute(
+            "SELECT * FROM words WHERE chat_id = ?", (chat_id,)
+        ).fetchall()
     if not rows:
         return None
     weights = [compute_weight(r, now) for r in rows]
@@ -670,3 +680,34 @@ def words_matching_labels(
         f"ORDER BY w.mention_count ASC, w.added_at DESC",
         (chat_id, chat_id, *unique_names, len(unique_names)),
     ).fetchall()
+
+
+# --- focus (sticky per-chat label spec) -------------------------------------
+
+
+def get_focus_spec(conn: sqlite3.Connection, chat_id: int) -> str | None:
+    """Return the chat's stored focus spec or None when unset / chat missing.
+
+    The stored value is the normalised space-joined output of
+    `parse_label_spec` — a `.split()` recovers the list of names verbatim.
+    """
+    row = conn.execute(
+        "SELECT focus_spec FROM chats WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return row["focus_spec"]
+
+
+def set_focus_spec(
+    conn: sqlite3.Connection, chat_id: int, spec_text: str | None
+) -> None:
+    """Upsert the chat's focus spec; passing None clears it.
+
+    Ensures a `chats` row exists so `/focus` can be set before `/start`.
+    """
+    ensure_chat(conn, chat_id)
+    conn.execute(
+        "UPDATE chats SET focus_spec = ? WHERE chat_id = ?",
+        (spec_text, chat_id),
+    )
