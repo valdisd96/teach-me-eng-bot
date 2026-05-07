@@ -708,3 +708,226 @@ def test_csv_round_trip_unicode_preserves_translations() -> None:  # edge: unico
 def test_format_csv_with_non_tuple_row_raises() -> None:  # error: non-2-tuple → propagates Python's natural unpacking error
     with pytest.raises((TypeError, ValueError)):
         vocab.format_csv(["apple"])  # type: ignore[list-item]
+
+
+# --- labels DAO (issue #82) -------------------------------------------------
+
+
+def _word_id(conn: sqlite3.Connection, chat_id: int, text: str) -> int:
+    return conn.execute(
+        "SELECT id FROM words WHERE chat_id = ? AND text = ?", (chat_id, text)
+    ).fetchone()["id"]
+
+
+def _label_rows(conn: sqlite3.Connection, chat_id: int) -> list[tuple[int, str]]:
+    return [
+        (r["id"], r["name"])
+        for r in conn.execute(
+            "SELECT id, name FROM labels WHERE chat_id = ? ORDER BY id", (chat_id,)
+        ).fetchall()
+    ]
+
+
+def test_get_or_create_label_creates_new_row(conn: sqlite3.Connection) -> None:  # AC4 — returns int id, inserts row
+    vocab.ensure_chat(conn, CHAT)
+    lid = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    assert isinstance(lid, int), f"expected int id, got {type(lid).__name__}"
+    rows = _label_rows(conn, CHAT)
+    assert rows == [(lid, "pos:noun")], f"expected one labels row; got {rows!r}"
+
+
+def test_get_or_create_label_is_idempotent(conn: sqlite3.Connection) -> None:  # AC4 + example — twice → same id, one row
+    vocab.ensure_chat(conn, CHAT)
+    first = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    second = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    assert first == second, f"ids must match across calls; got {first} vs {second}"
+    assert len(_label_rows(conn, CHAT)) == 1, (
+        f"second call must not insert a duplicate; got {_label_rows(conn, CHAT)!r}"
+    )
+
+
+def test_get_or_create_label_scoped_per_chat(conn: sqlite3.Connection) -> None:  # AC4 — same name in 2 chats → 2 distinct ids
+    vocab.ensure_chat(conn, CHAT)
+    vocab.ensure_chat(conn, CHAT + 1)
+    a = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    b = vocab.get_or_create_label(conn, CHAT + 1, "pos:noun")
+    assert a != b, f"per-chat labels must have distinct ids; got {a} == {b}"
+
+
+def test_attach_label_returns_true_for_new(conn: sqlite3.Connection) -> None:  # AC4 — fresh attach returns True
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    lid = vocab.get_or_create_label(conn, CHAT, "type:medicine")
+    assert vocab.attach_label(conn, wid, lid) is True
+    assert vocab.labels_for_word(conn, wid) == ["type:medicine"]
+
+
+def test_attach_label_double_attach_returns_false(conn: sqlite3.Connection) -> None:  # edge — double-attach → False
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    lid = vocab.get_or_create_label(conn, CHAT, "type:medicine")
+    vocab.attach_label(conn, wid, lid)
+    assert vocab.attach_label(conn, wid, lid) is False, (
+        "second attach of the same (word, label) must report False"
+    )
+    rows = conn.execute(
+        "SELECT COUNT(*) AS n FROM word_labels WHERE word_id = ? AND label_id = ?",
+        (wid, lid),
+    ).fetchone()
+    assert rows["n"] == 1, f"only one row should exist; got {rows['n']}"
+
+
+def test_attach_label_unknown_id_raises_keyerror(conn: sqlite3.Connection) -> None:  # error — unknown label_id → KeyError
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    with pytest.raises(KeyError):
+        vocab.attach_label(conn, wid, 999_999)
+
+
+def test_attach_pos_replaces_existing_pos_label(conn: sqlite3.Connection) -> None:  # AC5 + example — pos:verb after pos:noun keeps only pos:verb
+    vocab.add_word(conn, CHAT, "run")
+    wid = _word_id(conn, CHAT, "run")
+    noun = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    verb = vocab.get_or_create_label(conn, CHAT, "pos:verb")
+
+    assert vocab.attach_label(conn, wid, noun) is True
+    assert vocab.attach_label(conn, wid, verb) is True
+
+    assert vocab.labels_for_word(conn, wid) == ["pos:verb"], (
+        "attaching a second pos:* must detach the prior pos:* atomically"
+    )
+
+
+def test_attach_pos_leaves_non_pos_labels_alone(conn: sqlite3.Connection) -> None:  # AC5 — non-pos:* labels untouched by the pos-swap
+    vocab.add_word(conn, CHAT, "ibuprofen")
+    wid = _word_id(conn, CHAT, "ibuprofen")
+    noun = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    medicine = vocab.get_or_create_label(conn, CHAT, "type:medicine")
+    verb = vocab.get_or_create_label(conn, CHAT, "pos:verb")
+
+    vocab.attach_label(conn, wid, noun)
+    vocab.attach_label(conn, wid, medicine)
+    vocab.attach_label(conn, wid, verb)
+
+    assert vocab.labels_for_word(conn, wid) == ["pos:verb", "type:medicine"], (
+        "swap must scope to pos:* only; non-pos labels must survive"
+    )
+
+
+def test_attach_pos_noop_when_same_already_attached(conn: sqlite3.Connection) -> None:  # edge — attaching pos:noun again → False, no other pos:* removed
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    noun = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    medicine = vocab.get_or_create_label(conn, CHAT, "type:medicine")
+
+    vocab.attach_label(conn, wid, noun)
+    vocab.attach_label(conn, wid, medicine)
+
+    assert vocab.attach_label(conn, wid, noun) is False, (
+        "re-attaching the same pos:* must report False"
+    )
+    assert vocab.labels_for_word(conn, wid) == ["pos:noun", "type:medicine"], (
+        "re-attaching same pos:* must not strip other labels"
+    )
+
+
+def test_attach_pos_wipes_multiple_stray_pos_rows(conn: sqlite3.Connection) -> None:  # edge — multiple stray pos:* rows all wiped
+    vocab.add_word(conn, CHAT, "lead")
+    wid = _word_id(conn, CHAT, "lead")
+    noun = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    verb = vocab.get_or_create_label(conn, CHAT, "pos:verb")
+    adj = vocab.get_or_create_label(conn, CHAT, "pos:adj")
+    new_pos = vocab.get_or_create_label(conn, CHAT, "pos:adverb")
+
+    # Bypass the DAO to plant multiple stray pos:* rows (the DAO would reject this).
+    for lid in (noun, verb, adj):
+        conn.execute(
+            "INSERT INTO word_labels(word_id, label_id) VALUES (?, ?)", (wid, lid)
+        )
+
+    assert vocab.attach_label(conn, wid, new_pos) is True
+    assert vocab.labels_for_word(conn, wid) == ["pos:adverb"], (
+        "all stray pos:* rows must be wiped, leaving only the new pos:* label"
+    )
+
+
+def test_detach_label_returns_true_when_attached(conn: sqlite3.Connection) -> None:  # AC4 — detach returns True iff a row was deleted
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    lid = vocab.get_or_create_label(conn, CHAT, "type:medicine")
+    vocab.attach_label(conn, wid, lid)
+
+    assert vocab.detach_label(conn, wid, lid) is True
+    assert vocab.labels_for_word(conn, wid) == []
+
+
+def test_detach_label_returns_false_when_absent(conn: sqlite3.Connection) -> None:  # edge — detach when not attached → False
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    lid = vocab.get_or_create_label(conn, CHAT, "type:medicine")
+    # No attach — there is no row to delete.
+    assert vocab.detach_label(conn, wid, lid) is False
+
+
+def test_labels_for_word_returns_sorted_names(conn: sqlite3.Connection) -> None:  # AC4 — names sorted ascending
+    vocab.add_word(conn, CHAT, "apple")
+    wid = _word_id(conn, CHAT, "apple")
+    # Attach in non-alphabetic order; the call must still return them sorted.
+    for name in ("type:medicine", "pos:noun", "category:fruit"):
+        vocab.attach_label(conn, wid, vocab.get_or_create_label(conn, CHAT, name))
+
+    out = vocab.labels_for_word(conn, wid)
+    assert out == ["category:fruit", "pos:noun", "type:medicine"], f"got {out!r}"
+
+
+def test_words_matching_labels_and_semantics(conn: sqlite3.Connection) -> None:  # AC4 + example — only words tagged with all of names
+    for w in ("apple", "ibuprofen", "banana"):
+        vocab.add_word(conn, CHAT, w)
+    pos_noun = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    type_med = vocab.get_or_create_label(conn, CHAT, "type:medicine")
+
+    # apple: pos:noun only.        ibuprofen: pos:noun + type:medicine.   banana: type:medicine only.
+    vocab.attach_label(conn, _word_id(conn, CHAT, "apple"), pos_noun)
+    vocab.attach_label(conn, _word_id(conn, CHAT, "ibuprofen"), pos_noun)
+    vocab.attach_label(conn, _word_id(conn, CHAT, "ibuprofen"), type_med)
+    vocab.attach_label(conn, _word_id(conn, CHAT, "banana"), type_med)
+
+    rows = vocab.words_matching_labels(conn, CHAT, ["pos:noun", "type:medicine"])
+    texts = [r["text"] for r in rows]
+    assert texts == ["ibuprofen"], f"AND across labels must yield only ibuprofen; got {texts!r}"
+
+
+def test_words_matching_labels_dedupes_names(conn: sqlite3.Connection) -> None:  # edge — duplicate names in input are deduped
+    vocab.add_word(conn, CHAT, "apple")
+    vocab.add_word(conn, CHAT, "ibuprofen")
+    pos_noun = vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    vocab.attach_label(conn, _word_id(conn, CHAT, "apple"), pos_noun)
+    vocab.attach_label(conn, _word_id(conn, CHAT, "ibuprofen"), pos_noun)
+
+    rows = vocab.words_matching_labels(conn, CHAT, ["pos:noun", "pos:noun", "pos:noun"])
+    texts = sorted(r["text"] for r in rows)
+    assert texts == ["apple", "ibuprofen"], (
+        f"duplicate names must collapse — both noun-tagged words should appear once each; got {texts!r}"
+    )
+
+
+def test_words_matching_labels_empty_returns_all_in_list_words_order(
+    conn: sqlite3.Connection,
+) -> None:  # edge — empty names → every word for chat, ordered like list_words
+    vocab.add_word(conn, CHAT, "old_high")
+    vocab.add_word(conn, CHAT, "old_low")
+    vocab.add_word(conn, CHAT, "new_low")
+    vocab.add_word(conn, CHAT + 1, "other_chat_word")  # different chat — must not appear
+
+    conn.execute("UPDATE words SET mention_count = 5 WHERE text = 'old_high'")
+    conn.execute("UPDATE words SET added_at = '2020-01-01' WHERE text = 'old_low'")
+
+    rows = vocab.words_matching_labels(conn, CHAT, [])
+    matched = [r["text"] for r in rows]
+    expected = [r["text"] for r in vocab.list_words(conn, CHAT)]
+    assert matched == expected, (
+        f"empty names must reproduce list_words ordering; got {matched!r} vs {expected!r}"
+    )
+    assert "other_chat_word" not in matched, (
+        "rows must scope to chat_id; other chat's word leaked"
+    )

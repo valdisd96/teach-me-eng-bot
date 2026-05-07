@@ -121,3 +121,184 @@ def test_init_db_translation_migration_idempotent(tmp_path: Path) -> None:  # AC
     cols = _word_columns(c)
     assert "translation" in cols
     c.close()
+
+
+# --- labels + word_labels schema (issue #82) -------------------------------
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> dict[str, dict]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {
+        r["name"]: {"type": r["type"], "notnull": r["notnull"], "pk": r["pk"]}
+        for r in rows
+    }
+
+
+def _foreign_keys(conn: sqlite3.Connection, table: str) -> list[dict]:
+    rows = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+    return [
+        {
+            "table": r["table"],
+            "from": r["from"],
+            "to": r["to"],
+            "on_delete": r["on_delete"],
+        }
+        for r in rows
+    ]
+
+
+def test_init_creates_labels_table(conn: sqlite3.Connection) -> None:  # AC1 — labels(id, chat_id, name) + UNIQUE + FK CASCADE
+    assert "labels" in _tables(conn), f"expected labels table, got {sorted(_tables(conn))}"
+
+    cols = _columns(conn, "labels")
+    assert "id" in cols and cols["id"]["pk"] == 1, f"id must be PK; got {cols.get('id')!r}"
+    assert "chat_id" in cols and cols["chat_id"]["notnull"] == 1, (
+        f"chat_id must be NOT NULL; got {cols.get('chat_id')!r}"
+    )
+    assert "name" in cols and cols["name"]["notnull"] == 1, (
+        f"name must be NOT NULL; got {cols.get('name')!r}"
+    )
+
+    # UNIQUE(chat_id, name): inserting the same (chat_id, name) twice must fail.
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-04-21')"
+    )
+    conn.execute("INSERT INTO labels(chat_id, name) VALUES (1, 'pos:noun')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO labels(chat_id, name) VALUES (1, 'pos:noun')")
+
+    fks = _foreign_keys(conn, "labels")
+    chat_fk = next((fk for fk in fks if fk["from"] == "chat_id"), None)
+    assert chat_fk is not None, f"labels.chat_id must FK; got {fks!r}"
+    assert chat_fk["table"] == "chats", f"FK target must be chats, got {chat_fk!r}"
+    assert chat_fk["on_delete"].upper() == "CASCADE", (
+        f"labels.chat_id FK must ON DELETE CASCADE; got {chat_fk!r}"
+    )
+
+
+def test_init_creates_word_labels_table(conn: sqlite3.Connection) -> None:  # AC2 — word_labels(word_id, label_id) composite PK, FKs CASCADE
+    assert "word_labels" in _tables(conn), (
+        f"expected word_labels table, got {sorted(_tables(conn))}"
+    )
+
+    cols = _columns(conn, "word_labels")
+    assert "word_id" in cols and cols["word_id"]["pk"] >= 1, (
+        f"word_id must be part of PK; got {cols.get('word_id')!r}"
+    )
+    assert "label_id" in cols and cols["label_id"]["pk"] >= 1, (
+        f"label_id must be part of PK; got {cols.get('label_id')!r}"
+    )
+
+    # Composite PK: same (word_id, label_id) twice must fail.
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-04-21')"
+    )
+    conn.execute(
+        "INSERT INTO words(chat_id, text, added_at) VALUES (1, 'apple', '2026-04-21')"
+    )
+    conn.execute("INSERT INTO labels(chat_id, name) VALUES (1, 'pos:noun')")
+    wid = conn.execute("SELECT id FROM words").fetchone()["id"]
+    lid = conn.execute("SELECT id FROM labels").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO word_labels(word_id, label_id) VALUES (?, ?)", (wid, lid)
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO word_labels(word_id, label_id) VALUES (?, ?)", (wid, lid)
+        )
+
+    fks = _foreign_keys(conn, "word_labels")
+    word_fk = next((fk for fk in fks if fk["from"] == "word_id"), None)
+    label_fk = next((fk for fk in fks if fk["from"] == "label_id"), None)
+    assert word_fk is not None and word_fk["table"] == "words", (
+        f"word_id must FK to words; got {fks!r}"
+    )
+    assert word_fk["on_delete"].upper() == "CASCADE", (
+        f"word_id FK must ON DELETE CASCADE; got {word_fk!r}"
+    )
+    assert label_fk is not None and label_fk["table"] == "labels", (
+        f"label_id must FK to labels; got {fks!r}"
+    )
+    assert label_fk["on_delete"].upper() == "CASCADE", (
+        f"label_id FK must ON DELETE CASCADE; got {label_fk!r}"
+    )
+
+
+def test_init_db_label_tables_idempotent(tmp_path: Path) -> None:  # AC3 — forward-only + idempotent: rows untouched, tables present
+    path = tmp_path / "vocab.db"
+    c = db_mod.connect(path)
+    db_mod.init_db(c)
+
+    # Seed the new tables so we can detect any data wipe across re-init.
+    c.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-04-21')"
+    )
+    c.execute(
+        "INSERT INTO words(chat_id, text, added_at) VALUES (1, 'apple', '2026-04-21')"
+    )
+    c.execute("INSERT INTO labels(chat_id, name) VALUES (1, 'pos:noun')")
+    wid = c.execute("SELECT id FROM words").fetchone()["id"]
+    lid = c.execute("SELECT id FROM labels").fetchone()["id"]
+    c.execute(
+        "INSERT INTO word_labels(word_id, label_id) VALUES (?, ?)", (wid, lid)
+    )
+
+    db_mod.init_db(c)  # second call must not raise or wipe data
+
+    assert {"labels", "word_labels"}.issubset(_tables(c))
+    assert c.execute("SELECT COUNT(*) AS n FROM labels").fetchone()["n"] == 1, (
+        "existing labels rows must survive re-init"
+    )
+    assert c.execute("SELECT COUNT(*) AS n FROM word_labels").fetchone()["n"] == 1, (
+        "existing word_labels rows must survive re-init"
+    )
+    c.close()
+
+
+def test_delete_word_cascades_to_word_labels(conn: sqlite3.Connection) -> None:  # AC6 — DELETE FROM words wipes word_labels rows
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-04-21')"
+    )
+    conn.execute(
+        "INSERT INTO words(chat_id, text, added_at) VALUES (1, 'apple', '2026-04-21')"
+    )
+    conn.execute("INSERT INTO labels(chat_id, name) VALUES (1, 'pos:noun')")
+    wid = conn.execute("SELECT id FROM words").fetchone()["id"]
+    lid = conn.execute("SELECT id FROM labels").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO word_labels(word_id, label_id) VALUES (?, ?)", (wid, lid)
+    )
+
+    conn.execute("DELETE FROM words WHERE id = ?", (wid,))
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM word_labels").fetchone()["n"] == 0, (
+        "word_labels rows must cascade-delete with their word"
+    )
+    # The label row itself should remain — only word_labels cascades from words.
+    assert conn.execute("SELECT COUNT(*) AS n FROM labels").fetchone()["n"] == 1, (
+        "deleting a word must NOT delete labels"
+    )
+
+
+def test_delete_chat_cascades_to_labels_and_word_labels(conn: sqlite3.Connection) -> None:  # AC6 — DELETE FROM chats wipes labels + word_labels transitively
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (7, 'UTC', '2026-04-21')"
+    )
+    conn.execute(
+        "INSERT INTO words(chat_id, text, added_at) VALUES (7, 'apple', '2026-04-21')"
+    )
+    conn.execute("INSERT INTO labels(chat_id, name) VALUES (7, 'pos:noun')")
+    wid = conn.execute("SELECT id FROM words").fetchone()["id"]
+    lid = conn.execute("SELECT id FROM labels").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO word_labels(word_id, label_id) VALUES (?, ?)", (wid, lid)
+    )
+
+    conn.execute("DELETE FROM chats WHERE chat_id = 7")
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM labels").fetchone()["n"] == 0, (
+        "labels must cascade-delete when their chat is removed"
+    )
+    assert conn.execute("SELECT COUNT(*) AS n FROM word_labels").fetchone()["n"] == 0, (
+        "word_labels must cascade transitively (via words and labels)"
+    )
