@@ -45,6 +45,7 @@ import config_flow
 import db as db_module
 import games as games_module
 import irregular_verbs as irregular_module
+import label_suggestor
 import llm
 import prompts
 import scheduler as sched_module
@@ -120,6 +121,8 @@ conv_paths: dict[int, Path] = {}
 sessions: dict[int, config_flow.ConfigSession] = {}
 # Tokens → (chat_id, word) for pending /translate "Add to vocab" buttons.
 pending_vocab: translator.PendingVocab = translator.PendingVocab()
+# Tokens → (chat_id, word_id, label_name) for label-suggestion buttons under /add.
+pending_labels: label_suggestor.PendingLabel = label_suggestor.PendingLabel()
 # Chats that recently issued /import: chat_id → expiry monotonic timestamp.
 # The next document upload from these chats is parsed as a vocab CSV.
 import_pending: dict[int, float] = {}
@@ -409,8 +412,48 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "cmd_add: translate %r → %r failed: %s", normalized, target, e
             )
         await update.message.reply_text(f"➕ Added: {normalized}")
+        word_id = vocab.find_word_id(conn, chat_id, normalized)
+        if word_id is not None:
+            await _send_label_suggestions(chat_id, word_id, normalized)
     else:
         await update.message.reply_text(f"Already in your vocab: {normalized}")
+
+
+async def _send_label_suggestions(chat_id: int, word_id: int, word: str) -> None:
+    """Best-effort follow-up to a successful /add: suggest labels as buttons.
+
+    Fetches the chat's existing labels, asks the LLM for a POS classification
+    plus a few semantically-fitting existing labels, and posts one inline
+    button per suggestion. Any failure (LLM error, empty result, Telegram
+    send error) is logged and swallowed so the user-facing add reply is
+    never affected.
+    """
+    assert conn is not None and app is not None
+    existing = [name for name, _n in vocab.labels_with_counts(conn, chat_id)]
+    try:
+        suggestions = await label_suggestor.suggest_labels(
+            word, existing, llm_chat=llm.chat
+        )
+    except Exception as e:  # noqa: BLE001 — never let a flaky LLM break /add
+        log.warning("suggest_labels failed for word %r: %s", word, e)
+        return
+    if not suggestions:
+        return
+    rows = []
+    for name in suggestions:
+        token = pending_labels.register(chat_id, word_id, name)
+        rows.append([InlineKeyboardButton(name, callback_data=f"lbl:{token}")])
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=f"Suggested labels for {word} (tap to attach):",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "failed to send label suggestions for chat %s word %r: %s",
+            chat_id, word, e,
+        )
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1029,6 +1072,57 @@ async def on_add_vocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pass  # message too old or already replaced
 
 
+async def on_label_suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle a tap on a /add label-suggestion button.
+
+    Looks the token up in `pending_labels`, attaches the label to the word,
+    and edits the tapped button into a non-interactive `✅ <name>` while
+    leaving the other buttons in the keyboard active. Unknown tokens (bot
+    restart, evicted) edit the button to `⚠️ expired` and skip the DB write.
+    """
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, token_s = query.data.split(":")
+        token = int(token_s)
+    except (ValueError, AttributeError):
+        log.warning("Malformed lbl callback: %r", query.data)
+        return
+    entry = pending_labels.pop(token)
+    if entry is None:
+        new_label = "⚠️ expired"
+    else:
+        entry_chat_id, word_id, name = entry
+        try:
+            label_id = vocab.get_or_create_label(conn, entry_chat_id, name)
+            vocab.attach_label(conn, word_id, label_id)
+            new_label = f"✅ {name}"
+        except Exception as e:  # noqa: BLE001 — surface failure inline, don't crash
+            log.warning("attach label %r failed: %s", name, e)
+            new_label = f"⚠️ {name}"
+
+    # Rebuild the keyboard, replacing only the tapped button.
+    new_rows: list[list[InlineKeyboardButton]] = []
+    if query.message and query.message.reply_markup:
+        for row in query.message.reply_markup.inline_keyboard:
+            new_row: list[InlineKeyboardButton] = []
+            for btn in row:
+                if btn.callback_data == query.data:
+                    new_row.append(
+                        InlineKeyboardButton(new_label, callback_data="noop")
+                    )
+                else:
+                    new_row.append(btn)
+            new_rows.append(new_row)
+    try:
+        await query.edit_message_reply_markup(InlineKeyboardMarkup(new_rows))
+    except BadRequest:
+        pass  # message too old or already replaced
+
+
 async def on_resetvocab_confirm(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1363,6 +1457,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
     app.add_handler(CallbackQueryHandler(on_add_vocab, pattern=r"^av:"))
+    app.add_handler(CallbackQueryHandler(on_label_suggest, pattern=r"^lbl:"))
     app.add_handler(CallbackQueryHandler(on_games_menu, pattern=r"^gm:"))
     app.add_handler(CallbackQueryHandler(on_play_game, pattern=r"^pg:"))
     app.add_handler(CallbackQueryHandler(on_game_answer, pattern=r"^g:"))
