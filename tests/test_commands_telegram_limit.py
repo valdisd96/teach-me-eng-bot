@@ -54,18 +54,21 @@ def _games_desc() -> str:
 
 
 def test_all_commands_descriptions_within_256_chars() -> None:  # AC1, edge: boundary `<=` not `<`
-    """Every (name, desc) in bot.COMMANDS must satisfy len(desc) <= 256.
+    """Every (name, desc) in bot.COMMANDS must satisfy len(desc.encode("utf-8")) <= 256.
 
-    Telegram's setMyCommands API rejects any description over 256 chars; the
-    bot crashes at startup if any entry exceeds the limit. Boundary direction:
-    exactly 256 must pass (hence `<= 256`, not `< 256`).
+    Telegram's setMyCommands API enforces the 256 limit on the UTF-8 byte length
+    of the description, not the Unicode code-point count. A previous fix passed
+    a char-length check but still tripped the wire-level byte check (#110).
+    Boundary direction: exactly 256 bytes must pass (hence `<= 256`, not `< 256`).
     """
     offenders = [
-        (name, len(desc)) for name, desc in bot.COMMANDS if len(desc) > TELEGRAM_DESC_MAX
+        (name, len(desc.encode("utf-8")))
+        for name, desc in bot.COMMANDS
+        if len(desc.encode("utf-8")) > TELEGRAM_DESC_MAX
     ]
     assert not offenders, (
-        f"AC1: every COMMANDS description must be <= {TELEGRAM_DESC_MAX} chars; "
-        f"offenders (name, length): {offenders}"
+        f"AC1: every COMMANDS description must be <= {TELEGRAM_DESC_MAX} UTF-8 bytes; "
+        f"offenders (name, byte-length): {offenders}"
     )
 
 
