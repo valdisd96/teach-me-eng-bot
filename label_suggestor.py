@@ -148,7 +148,13 @@ async def suggest_labels(
         return []
     messages = _build_messages(word, existing_labels)
     try:
-        raw = await llm_chat(messages, max_tokens=128, temperature=0.2)
+        # disable_reasoning: a small max_tokens budget plus the free-tier
+        # auto-router can land on a reasoning-heavy model that spends the whole
+        # budget on its `message.reasoning` trace and returns `content: null`.
+        # Suppressing reasoning keeps the JSON answer in `content`.
+        raw = await llm_chat(
+            messages, max_tokens=128, temperature=0.2, disable_reasoning=True
+        )
     except Exception as exc:  # noqa: BLE001 — never let a flaky LLM break /add
         log.warning("suggest_labels: LLM call failed for %r: %s", word, exc)
         return []

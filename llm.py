@@ -125,21 +125,30 @@ async def chat(
     *,
     max_tokens: int = 256,
     temperature: float = 0.8,
+    disable_reasoning: bool = False,
 ) -> str:
-    """Return the full assistant reply as a single string (no streaming)."""
+    """Return the full assistant reply as a single string (no streaming).
+
+    When ``disable_reasoning=True`` the request body carries
+    ``reasoning: {enabled: false}`` — an OpenRouter-normalised hint that suppresses
+    the model's chain-of-thought trace. Needed for callers that share a small
+    ``max_tokens`` budget with reasoning-heavy free-tier auto-router targets,
+    which would otherwise spend the whole budget on ``message.reasoning`` and
+    return ``content: null``. Default ``False`` keeps every existing caller's
+    on-the-wire payload byte-identical.
+    """
     backend = _get_backend()
+    body: dict = {
+        "model": backend.model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if disable_reasoning:
+        body["reasoning"] = {"enabled": False}
     async with httpx.AsyncClient(timeout=180) as client:
-        r = await client.post(
-            backend.url,
-            headers=backend.headers,
-            json={
-                "model": backend.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": False,
-            },
-        )
+        r = await client.post(backend.url, headers=backend.headers, json=body)
         r.raise_for_status()
         return _parse_completion(r.json())
 
