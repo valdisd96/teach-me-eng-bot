@@ -163,6 +163,58 @@ def test_suggest_labels_empty_existing_and_llm_fails() -> None:  # edge: empty e
     assert out == [], f"empty existing + LLM failure must yield []; got {out!r}"
 
 
+# === issue #99: disable_reasoning wiring ===================================
+
+
+def test_suggest_labels_invokes_llm_chat_with_disable_reasoning_true() -> None:
+    # AC3 — suggest_labels must call llm_chat exactly once with
+    # disable_reasoning=True among its kwargs.
+    spy = AsyncMock(return_value='{"pos": "noun", "labels": []}')
+    asyncio.run(label_suggestor.suggest_labels("horse", ["type:animal"], spy))
+    assert spy.await_count == 1, (
+        f"AC3 — llm_chat must be invoked exactly once; got {spy.await_count}"
+    )
+    kwargs = spy.await_args.kwargs
+    assert kwargs.get("disable_reasoning") is True, (
+        "AC3 — suggest_labels must forward disable_reasoning=True; "
+        f"got kwargs={kwargs!r}"
+    )
+
+
+def test_other_llm_callers_do_not_pass_disable_reasoning() -> None:
+    # AC4 — bot.cmd_* games and scheduler.push/explain must NOT pass
+    # disable_reasoning to llm.chat. Static-source check: the kwarg name
+    # must not appear in any module other than label_suggestor.py.
+    repo_root = Path(label_suggestor.__file__).parent
+    forbidden = ("bot.py", "scheduler.py")
+    for name in forbidden:
+        src = (repo_root / name).read_text(encoding="utf-8")
+        assert "disable_reasoning" not in src, (
+            f"AC4 — {name} must not pass disable_reasoning to llm.chat; "
+            "only label_suggestor is allowed to opt in."
+        )
+
+
+def test_suggest_labels_output_unchanged_with_disable_reasoning_wired() -> None:
+    # AC5 — when the LLM returns parseable JSON, suggest_labels still produces
+    # the same ordered + deduped + capped list it did before the kwarg was
+    # threaded through. The disable_reasoning plumbing must not alter the
+    # post-parse pipeline.
+    raw = (
+        '{"pos": "noun", '
+        '"labels": ["type:animal", "type:animal", "type:pet", "type:invented"]}'
+    )
+    existing = ["type:animal", "type:pet"]
+    spy = AsyncMock(return_value=raw)
+    out = asyncio.run(label_suggestor.suggest_labels("horse", existing, spy))
+    # POS first, declared order, unknown ('type:invented') filtered, duplicates
+    # collapsed — same contract the existing parse_llm_response tests assert.
+    assert out == ["pos:noun", "type:animal", "type:pet"], (
+        "AC5 — suggest_labels output must be unchanged by disable_reasoning "
+        f"wiring; got {out!r}"
+    )
+
+
 # === PendingLabel registry ==================================================
 
 
