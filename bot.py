@@ -128,9 +128,15 @@ import_pending: dict[int, float] = {}
 games: dict[int, games_module.Game] = {}
 # In-flight /irregulars sessions: same one-per-chat semantics as `games`.
 irregulars: dict[int, irregular_module.Game] = {}
+# Label spec captured between `/games <spec>` and the direction-picker tap.
+# Empty / missing entry means "no filter". Latest /games wins; popped on game start.
+pending_game_filters: dict[int, list[str]] = {}
 
 GAMES_NEED_VOCAB = "add at least 4 words to your vocab first"
 GAMES_IN_PROGRESS = "you have a game in progress"
+GAMES_NO_LABEL_MATCH = (
+    "no words match those labels — try fewer filters or `/label` more words"
+)
 IRREGULARS_IN_PROGRESS = "you have an irregular-verbs game in progress"
 IRREGULARS_PROMPT_HINT = (
     'Reply with the past simple and past participle, e.g. "went / gone".'
@@ -274,7 +280,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Play a vocab quiz (Word → Translation or Translation → Word, 1–10 rounds)"),
+    ("games", "Play a vocab quiz (Word → Translation or Translation → Word, 1–10 rounds; optionally filter by a label spec, AND across tokens)"),
     ("irregulars", "Practise irregular verbs — type the past simple + past participle (1–10 rounds)"),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
@@ -747,8 +753,17 @@ async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # --- /games -----------------------------------------------------------------
 
 
-def _playable_rows(conn_: sqlite3.Connection, chat_id: int) -> list[sqlite3.Row]:
-    return [r for r in vocab.list_words(conn_, chat_id) if r["translation"]]
+def _playable_rows(
+    conn_: sqlite3.Connection,
+    chat_id: int,
+    names: list[str] | None = None,
+) -> list[sqlite3.Row]:
+    rows = (
+        vocab.words_matching_labels(conn_, chat_id, names)
+        if names
+        else vocab.list_words(conn_, chat_id)
+    )
+    return [r for r in rows if r["translation"]]
 
 
 def _round_keyboard(game: games_module.Game) -> InlineKeyboardMarkup:
@@ -773,9 +788,22 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if chat_id in games:
         await update.message.reply_text(GAMES_IN_PROGRESS)
         return
-    if len(_playable_rows(conn, chat_id)) < games_module.MIN_VOCAB:
-        await update.message.reply_text(GAMES_NEED_VOCAB)
-        return
+    spec_args = context.args or []
+    if spec_args:
+        try:
+            names = vocab.parse_label_spec(spec_args)
+        except ValueError as e:
+            await update.message.reply_text(f"⚠️ {e}")
+            return
+        if len(_playable_rows(conn, chat_id, names)) < games_module.MIN_VOCAB:
+            await update.message.reply_text(GAMES_NO_LABEL_MATCH)
+            return
+        pending_game_filters[chat_id] = names
+    else:
+        if len(_playable_rows(conn, chat_id)) < games_module.MIN_VOCAB:
+            await update.message.reply_text(GAMES_NEED_VOCAB)
+            return
+        pending_game_filters.pop(chat_id, None)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
         InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
@@ -964,13 +992,17 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if chat_id in games:
         await query.message.reply_text(GAMES_IN_PROGRESS)
         return
-    rows = _playable_rows(conn, chat_id)
+    names = pending_game_filters.get(chat_id) or None
+    rows = _playable_rows(conn, chat_id, names)
     if len(rows) < games_module.MIN_VOCAB:
-        await query.message.reply_text(GAMES_NEED_VOCAB)
+        await query.message.reply_text(
+            GAMES_NO_LABEL_MATCH if names else GAMES_NEED_VOCAB
+        )
         return
     rounds = games_module.draw_rounds(rows, direction=direction, rng=random.Random())
     game = games_module.Game(chat_id=chat_id, rounds=rounds)
     games[chat_id] = game
+    pending_game_filters.pop(chat_id, None)
     await _send_round(context.bot, chat_id, game)
 
 
@@ -992,6 +1024,7 @@ async def on_play_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(_playable_rows(conn, chat_id)) < games_module.MIN_VOCAB:
         await query.message.reply_text(GAMES_NEED_VOCAB)
         return
+    pending_game_filters.pop(chat_id, None)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
         InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
