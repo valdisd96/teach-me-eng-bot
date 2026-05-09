@@ -698,8 +698,8 @@ def test_on_play_game_seeds_filter_from_focus(
     update = _make_callback_update("pg:start")
     asyncio.run(bot.on_play_game(update, _make_context([])))
 
-    assert bot.pending_game_filters.get(CHAT) == ["pos:noun"], (
-        f"AC4: on_play_game must seed pending_game_filters with the focus tokens; got "
+    assert bot.pending_game_filters.get(CHAT) == ("all", ["pos:noun"]), (
+        f"AC4: on_play_game must seed pending_game_filters with (mode, names); got "
         f"{bot.pending_game_filters!r}"
     )
 
@@ -712,7 +712,7 @@ def test_on_play_game_clears_filter_when_no_focus(
         conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
     )
     # Stale leftover from a prior /games <spec> that must NOT survive.
-    bot.pending_game_filters[CHAT] = ["was-here"]
+    bot.pending_game_filters[CHAT] = ("all", ["was-here"])
     assert vocab.get_focus_spec(conn, CHAT) is None  # precondition: no focus
 
     update = _make_callback_update("pg:start")
@@ -739,7 +739,7 @@ def test_on_play_game_then_picker_uses_focus_filtered_pool(
     # Step 1: tap "🎮 Play game" — this should seed the focus into the stash.
     pg_update = _make_callback_update("pg:start")
     asyncio.run(bot.on_play_game(pg_update, _make_context([])))
-    assert bot.pending_game_filters.get(CHAT) == ["pos:noun"], (
+    assert bot.pending_game_filters.get(CHAT) == ("all", ["pos:noun"]), (
         "precondition: on_play_game must seed the stash before picker tap; got "
         f"{bot.pending_game_filters!r}"
     )

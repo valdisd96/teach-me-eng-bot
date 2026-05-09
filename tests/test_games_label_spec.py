@@ -259,7 +259,7 @@ def test_cmd_games_no_args_overwrites_existing_stash(
     _seed_translatable(
         conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
     )
-    bot.pending_game_filters[CHAT] = ["pos:noun"]  # leftover from a prior /games <spec>
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])  # leftover from a prior /games <spec>
     update = _make_command_update()
 
     asyncio.run(bot.cmd_games(update, _make_context([])))
@@ -293,7 +293,7 @@ def test_cmd_games_filtered_with_match_shows_picker_and_stashes(
         "viable filtered pool must show the gm:wt / gm:tw picker; "
         f"got {update.message.reply_text.call_args_list}"
     )
-    assert bot.pending_game_filters.get(CHAT) == ["pos:noun"], (
+    assert bot.pending_game_filters.get(CHAT) == ("all", ["pos:noun"]), (
         f"filter must be stashed for the picker tap; got {bot.pending_game_filters!r}"
     )
 
@@ -437,7 +437,7 @@ def test_cmd_games_in_progress_with_spec_args_short_circuits(
         conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
     )
     bot.games[CHAT] = MagicMock()  # game already running
-    bot.pending_game_filters[CHAT] = ["was-here"]  # leftover; must remain untouched
+    bot.pending_game_filters[CHAT] = ("all", ["was-here"])  # leftover; must remain untouched
 
     # parse_label_spec must not even be called — guard with a boom spy.
     def _parser_boom(*args, **kwargs):
@@ -455,7 +455,7 @@ def test_cmd_games_in_progress_with_spec_args_short_circuits(
     assert _picker_call(update) is None, (
         "AC6: in-progress short-circuit must not show the picker"
     )
-    assert bot.pending_game_filters.get(CHAT) == ["was-here"], (
+    assert bot.pending_game_filters.get(CHAT) == ("all", ["was-here"]), (
         "AC6: in-progress branch must not mutate the stash; "
         f"got {bot.pending_game_filters!r}"
     )
@@ -483,7 +483,7 @@ def test_cmd_games_dedups_mixed_case_spec_tokens(
         "show the picker for the viable filtered pool"
     )
     stashed = bot.pending_game_filters.get(CHAT)
-    assert stashed == ["pos:noun"], (
+    assert stashed == ("all", ["pos:noun"]), (
         f"stash must hold the deduped/lowercased label list; got {stashed!r}"
     )
 
@@ -500,7 +500,7 @@ def test_on_games_menu_with_stashed_filter_uses_filtered_pool(
     _seed_translatable(conn, CHAT, matching + other)
     for w in matching:
         _attach(conn, CHAT, w, "pos:noun")
-    bot.pending_game_filters[CHAT] = ["pos:noun"]
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
 
     matching_ids = {_word_id(conn, CHAT, w) for w in matching}
 
@@ -568,7 +568,7 @@ def test_on_games_menu_pops_stash_on_successful_start(
     _seed_translatable(conn, CHAT, matching)
     for w in matching:
         _attach(conn, CHAT, w, "pos:noun")
-    bot.pending_game_filters[CHAT] = ["pos:noun"]
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
 
     update = _make_callback_update("gm:wt")
     asyncio.run(bot.on_games_menu(update, _make_context([])))
@@ -589,7 +589,7 @@ def test_on_games_menu_filtered_below_min_replies_no_label_match(
     )
     # Only 1 row labelled — filtered pool < MIN_VOCAB.
     _attach(conn, CHAT, "w0", "pos:noun")
-    bot.pending_game_filters[CHAT] = ["pos:noun"]
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
 
     update = _make_callback_update("gm:wt")
     asyncio.run(bot.on_games_menu(update, _make_context([])))
@@ -632,7 +632,7 @@ def test_on_games_menu_stale_tap_uses_current_stash(
     for w in b_words:
         _attach(conn, CHAT, w, "spec:b")
     # Latest /games wins → stash carries spec:b at tap time.
-    bot.pending_game_filters[CHAT] = ["spec:b"]
+    bot.pending_game_filters[CHAT] = ("all", ["spec:b"])
     b_ids = {_word_id(conn, CHAT, w) for w in b_words}
     a_ids = {_word_id(conn, CHAT, w) for w in a_words}
 
@@ -660,7 +660,7 @@ def test_on_play_game_clears_pending_filter(
     _seed_translatable(
         conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
     )
-    bot.pending_game_filters[CHAT] = ["pos:noun"]
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
 
     update = _make_callback_update("pg:start")
     asyncio.run(bot.on_play_game(update, _make_context([])))

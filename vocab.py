@@ -24,7 +24,7 @@ import math
 import random
 import re
 import sqlite3
-from typing import Callable
+from typing import Callable, Literal
 
 from fsrs import Card, Rating, Scheduler, State
 
@@ -496,19 +496,20 @@ def select_word(
     chat_id: int,
     *,
     names: list[str] | None = None,
+    mode: Literal["all", "any"] = "all",
     rng: random.Random | None = None,
     now: datetime.datetime | None = None,
 ) -> sqlite3.Row | None:
     """Sample one word for this chat using the weighted formula. None if empty.
 
-    When `names` is non-empty, the candidate pool is restricted to words
-    tagged with **all** of those label names (AND semantics, via
-    `words_matching_labels`). An empty list or None preserves the unfiltered
-    pool.
+    When `names` is non-empty, the candidate pool is restricted via
+    `words_matching_labels` — `mode="all"` (default) requires every label,
+    `mode="any"` requires at least one. Empty `names` (or None) preserves the
+    unfiltered pool regardless of `mode`.
     """
     now = now or _now_dt()
     if names:
-        rows = words_matching_labels(conn, chat_id, names)
+        rows = words_matching_labels(conn, chat_id, names, mode=mode)
     else:
         rows = conn.execute(
             "SELECT * FROM words WHERE chat_id = ?", (chat_id,)
@@ -790,13 +791,16 @@ def words_matching_labels(
     conn: sqlite3.Connection,
     chat_id: int,
     names: list[str],
+    *,
+    mode: Literal["all", "any"] = "all",
 ) -> list[sqlite3.Row]:
-    """Words for `chat_id` tagged with **all** of `names` (AND semantics).
+    """Words for `chat_id` filtered by `names` — AND (default) or OR.
 
-    Duplicate entries in `names` are deduped — `["pos:noun", "pos:noun"]`
-    matches the same words as `["pos:noun"]`. An empty `names` returns every
-    word for the chat (no filter). Result ordering matches `list_words`:
-    mention_count ASC, added_at DESC.
+    `mode="all"` requires every name (AND); `mode="any"` requires at least
+    one (OR). Duplicate entries in `names` are deduped under both modes.
+    An empty `names` returns every word for the chat (no filter) regardless
+    of mode. Result ordering matches `list_words`: mention_count ASC,
+    added_at DESC.
     """
     if not names:
         return conn.execute(
@@ -806,6 +810,16 @@ def words_matching_labels(
         ).fetchall()
     unique_names = list(dict.fromkeys(names))
     placeholders = ",".join("?" * len(unique_names))
+    if mode == "any":
+        return conn.execute(
+            f"SELECT DISTINCT w.* FROM words w "
+            f"JOIN word_labels wl ON wl.word_id = w.id "
+            f"JOIN labels l ON l.id = wl.label_id "
+            f"WHERE w.chat_id = ? AND l.chat_id = ? "
+            f"AND l.name IN ({placeholders}) "
+            f"ORDER BY w.mention_count ASC, w.added_at DESC",
+            (chat_id, chat_id, *unique_names),
+        ).fetchall()
     return conn.execute(
         f"SELECT w.* FROM words w "
         f"JOIN word_labels wl ON wl.word_id = w.id "
@@ -819,6 +833,25 @@ def words_matching_labels(
 
 
 # --- focus (sticky per-chat label spec) -------------------------------------
+
+
+FOCUS_ANY_FLAG = "--any"
+
+
+def split_focus_spec(
+    text: str | None,
+) -> tuple[Literal["all", "any"], list[str]]:
+    """Decode a stored focus spec into `(mode, names)`.
+
+    A leading `--any` token marks OR-mode; everything else is the labels
+    list. `None` or empty → `("all", [])`.
+    """
+    if not text:
+        return "all", []
+    tokens = text.split()
+    if tokens and tokens[0] == FOCUS_ANY_FLAG:
+        return "any", tokens[1:]
+    return "all", tokens
 
 
 def get_focus_spec(conn: sqlite3.Connection, chat_id: int) -> str | None:

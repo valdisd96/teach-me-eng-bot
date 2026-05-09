@@ -150,7 +150,7 @@ def test_cancel_during_vocab_game_clears_pending_filter(
 ) -> None:  # AC1 — pending_game_filters[chat_id] is also cleared
     _patch_bot(monkeypatch, conn)
     bot.games[CHAT] = MagicMock()
-    bot.pending_game_filters[CHAT] = ["pos:noun"]
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
     update = _make_command_update()
 
     asyncio.run(bot.cmd_games(update, _make_context(["cancel"])))
@@ -221,7 +221,7 @@ def test_cancel_with_only_stashed_filter_replies_nothing(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # AC4 — stashed filter alone is not "in progress" → GAMES_NOTHING_TO_CANCEL
     _patch_bot(monkeypatch, conn)
-    bot.pending_game_filters[CHAT] = ["pos:noun"]
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
     update = _make_command_update()
 
     asyncio.run(bot.cmd_games(update, _make_context(["cancel"])))
@@ -237,7 +237,7 @@ def test_cancel_with_only_stashed_filter_clears_filter(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # AC4 — pending_game_filters cleared regardless
     _patch_bot(monkeypatch, conn)
-    bot.pending_game_filters[CHAT] = ["pos:noun"]
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
     update = _make_command_update()
 
     asyncio.run(bot.cmd_games(update, _make_context(["cancel"])))
