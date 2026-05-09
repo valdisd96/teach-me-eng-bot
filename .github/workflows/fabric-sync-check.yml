@@ -39,7 +39,7 @@ jobs:
 
       - name: install agent-fabric
         env:
-          AGENT_FABRIC_SHA: c7e91bba1abbd4ae3655dbd3d13a565255031548
+          AGENT_FABRIC_SHA: 8e59f65b9f146e3c23861f0bd43a4a1933342965
         run: |
           pip install "agent-fabric @ git+https://github.com/valdisd96/agent-fabric.git@${AGENT_FABRIC_SHA}"
 
