@@ -781,3 +781,547 @@ def test_focus_handler_registered_with_command_handler() -> None:  # AC8 — mai
     ), (
         "AC8: bot.main() must register CommandHandler(\"focus\", cmd_focus)"
     )
+
+
+# ============================================================================
+# Issue #112 — `--any` flag flips /focus to OR-mode label matching.
+#
+# AC tags below refer to the Behavioral spec block of the latest
+# `<!-- agent-plan v1 -->` comment on issue #112. AC numbers are LOCAL to that
+# spec — they do NOT collide with the AC numbering above (which belongs to
+# issue #86's spec for the original /focus feature).
+# ============================================================================
+
+
+# === vocab.split_focus_spec =================================================
+
+
+def test_split_focus_spec_any_flag_at_start() -> None:  # AC1, AC8 — "--any a b" → ("any", ["a","b"])
+    mode, names = vocab.split_focus_spec("--any type:body type:medicine")
+
+    assert mode == "any", (
+        f"AC1: leading --any token must yield mode 'any'; got {mode!r}"
+    )
+    assert names == ["type:body", "type:medicine"], (
+        f"AC1: --any must be stripped from names; got {names!r}"
+    )
+
+
+def test_split_focus_spec_no_flag_returns_all() -> None:  # AC6 — "a b" → ("all", ["a","b"])
+    mode, names = vocab.split_focus_spec("type:body type:medicine")
+
+    assert mode == "all", (
+        f"AC6: spec without --any must default to mode 'all'; got {mode!r}"
+    )
+    assert names == ["type:body", "type:medicine"], (
+        f"AC6: every token without --any must be returned as a label; got {names!r}"
+    )
+
+
+def test_split_focus_spec_none_input() -> None:  # edge — None → ("all", [])
+    mode, names = vocab.split_focus_spec(None)
+
+    assert mode == "all", f"None spec must default to mode 'all'; got {mode!r}"
+    assert names == [], f"None spec must yield empty names; got {names!r}"
+
+
+def test_split_focus_spec_empty_string() -> None:  # edge — "" → ("all", [])
+    mode, names = vocab.split_focus_spec("")
+
+    assert mode == "all", f"empty spec must default to mode 'all'; got {mode!r}"
+    assert names == [], f"empty spec must yield empty names; got {names!r}"
+
+
+def test_split_focus_spec_any_alone() -> None:  # spec example — "--any" alone → ("any", [])
+    mode, names = vocab.split_focus_spec("--any")
+
+    assert mode == "any", (
+        f"'--any' alone must still flip mode to 'any'; got {mode!r}"
+    )
+    assert names == [], (
+        f"'--any' alone must yield empty names list; got {names!r}"
+    )
+
+
+def test_split_focus_spec_any_not_at_position_0() -> None:  # AC12 — --any after labels stays a regular token
+    mode, names = vocab.split_focus_spec("type:body --any")
+
+    assert mode == "all", (
+        f"AC12: --any not at position 0 must NOT flip mode; got {mode!r}"
+    )
+    assert "--any" in names, (
+        f"AC12: --any not at position 0 must remain a regular token in names; got {names!r}"
+    )
+
+
+# === vocab.words_matching_labels(mode="any") ================================
+
+
+def test_words_matching_labels_any_returns_or_pool(
+    conn: sqlite3.Connection,
+) -> None:  # AC2 substrate — mode='any' returns words tagged with at least one label
+    vocab.add_word(conn, CHAT, "horse")
+    vocab.add_word(conn, CHAT, "pill")
+    vocab.add_word(conn, CHAT, "stone")
+    _attach(conn, CHAT, "horse", "type:body")
+    _attach(conn, CHAT, "pill", "type:medicine")
+    # 'stone' carries neither label — must NOT appear.
+
+    rows = vocab.words_matching_labels(
+        conn, CHAT, ["type:body", "type:medicine"], mode="any"
+    )
+    seen = {r["text"] for r in rows}
+
+    assert seen == {"horse", "pill"}, (
+        f"AC2: mode='any' must return the OR pool (body ∪ medicine), "
+        f"excluding unlabelled words; got {sorted(seen)}"
+    )
+
+
+def test_words_matching_labels_any_single_label_parity(
+    conn: sqlite3.Connection,
+) -> None:  # AC9 — mode='any' with one name == mode='all' with one name
+    vocab.add_word(conn, CHAT, "horse")
+    vocab.add_word(conn, CHAT, "pill")
+    vocab.add_word(conn, CHAT, "stone")
+    _attach(conn, CHAT, "horse", "type:body")
+    _attach(conn, CHAT, "pill", "type:body")
+    # 'stone' unlabelled — must not appear under either mode.
+
+    any_rows = vocab.words_matching_labels(conn, CHAT, ["type:body"], mode="any")
+    all_rows = vocab.words_matching_labels(conn, CHAT, ["type:body"], mode="all")
+
+    any_set = {r["text"] for r in any_rows}
+    all_set = {r["text"] for r in all_rows}
+
+    assert any_set == all_set == {"horse", "pill"}, (
+        f"AC9: single-label mode='any' must match mode='all'; "
+        f"any={sorted(any_set)} all={sorted(all_set)}"
+    )
+
+
+def test_words_matching_labels_any_empty_names(
+    conn: sqlite3.Connection,
+) -> None:  # AC10 — empty names + mode='any' → every word for the chat
+    vocab.add_word(conn, CHAT, "alpha")
+    vocab.add_word(conn, CHAT, "beta")
+    vocab.add_word(conn, CHAT, "gamma")
+
+    rows = vocab.words_matching_labels(conn, CHAT, [], mode="any")
+    seen = {r["text"] for r in rows}
+
+    assert seen == {"alpha", "beta", "gamma"}, (
+        f"AC10: empty names with mode='any' must return every word "
+        f"(parity with mode='all' empty-list behaviour); got {sorted(seen)}"
+    )
+
+
+def test_words_matching_labels_any_dedupes_duplicates(
+    conn: sqlite3.Connection,
+) -> None:  # edge — duplicate names after --any are deduped (no row dups, no inflated count)
+    vocab.add_word(conn, CHAT, "horse")
+    _attach(conn, CHAT, "horse", "type:body")
+
+    rows = vocab.words_matching_labels(
+        conn, CHAT, ["type:body", "type:body", "type:body"], mode="any"
+    )
+
+    assert [r["text"] for r in rows] == ["horse"], (
+        f"edge: duplicate names must collapse — single row, no duplication; "
+        f"got {[r['text'] for r in rows]!r}"
+    )
+
+
+# === vocab.select_word(mode="any") ==========================================
+
+
+def test_select_word_mode_any_filters_by_or(
+    conn: sqlite3.Connection,
+) -> None:  # AC2 — select_word(mode='any') samples from the OR pool only
+    vocab.add_word(conn, CHAT, "horse")
+    vocab.add_word(conn, CHAT, "pill")
+    vocab.add_word(conn, CHAT, "stone")
+    _attach(conn, CHAT, "horse", "type:body")
+    _attach(conn, CHAT, "pill", "type:medicine")
+    # 'stone' unlabelled.
+
+    rng = random.Random(0)
+    seen: set[str] = set()
+    for _ in range(60):
+        row = vocab.select_word(
+            conn,
+            CHAT,
+            names=["type:body", "type:medicine"],
+            mode="any",
+            rng=rng,
+        )
+        assert row is not None, "OR pool is non-empty; select_word must return a row"
+        seen.add(row["text"])
+
+    assert seen == {"horse", "pill"}, (
+        f"AC2: mode='any' must restrict select_word to the OR pool — "
+        f"'stone' must NEVER surface; got {sorted(seen)}"
+    )
+
+
+# === scheduler.compose_push(mode="any") =====================================
+
+
+def test_compose_push_passes_mode_to_select_word(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC2 — compose_push forwards mode to vocab.select_word
+    import config_flow
+
+    config_flow.save_settings(
+        conn,
+        CHAT,
+        config_flow.Settings("UTC", 2, "09:00", "21:00", "funny", "ru"),
+    )
+    vocab.add_word(conn, CHAT, "horse")
+    _attach(conn, CHAT, "horse", "type:body")
+
+    seen_kwargs: list[dict] = []
+    real_select = vocab.select_word
+
+    def spy(conn_, chat_, **kw):
+        seen_kwargs.append(kw)
+        return real_select(conn_, chat_, **kw)
+
+    monkeypatch.setattr(vocab, "select_word", spy)
+
+    async def llm_ok(msgs):
+        return "horse rides at dawn"
+
+    asyncio.run(
+        sched_module.compose_push(
+            conn,
+            CHAT,
+            llm_chat=llm_ok,
+            names=["type:body"],
+            mode="any",
+            rng=random.Random(0),
+        )
+    )
+
+    assert seen_kwargs, "select_word must be invoked at least once"
+    assert seen_kwargs[0].get("mode") == "any", (
+        f"AC2: compose_push must forward mode verbatim to select_word; "
+        f"got mode={seen_kwargs[0].get('mode')!r}"
+    )
+
+
+# === bot.cmd_focus (--any flag) =============================================
+
+
+def test_cmd_focus_any_stores_spec_verbatim(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC1 — focus_spec stored as "--any type:body type:medicine"
+    _patch_bot(monkeypatch, conn)
+    _seed_translatable(conn, CHAT, ["horse", "pill"])
+    _attach(conn, CHAT, "horse", "type:body")
+    _attach(conn, CHAT, "pill", "type:medicine")
+
+    update = _make_command_update()
+    asyncio.run(
+        bot.cmd_focus(
+            update, _make_context(["--any", "type:body", "type:medicine"])
+        )
+    )
+
+    stored = vocab.get_focus_spec(conn, CHAT)
+    assert stored == "--any type:body type:medicine", (
+        f"AC1: focus_spec must store the leading --any flag verbatim with "
+        f"the labels; got {stored!r}"
+    )
+
+
+def test_cmd_focus_any_reply_uses_or_match_count(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC1 — reply confirms set with OR-pool count, not AND-pool count
+    _patch_bot(monkeypatch, conn)
+    # Seed the discriminating pool: nothing carries BOTH labels (AND would be 0),
+    # but TWO words carry AT LEAST ONE (OR pool = 2).
+    _seed_translatable(conn, CHAT, ["horse", "pill"])
+    _attach(conn, CHAT, "horse", "type:body")
+    _attach(conn, CHAT, "pill", "type:medicine")
+
+    update = _make_command_update()
+    asyncio.run(
+        bot.cmd_focus(
+            update, _make_context(["--any", "type:body", "type:medicine"])
+        )
+    )
+
+    reply = _last_reply(update.message.reply_text)
+    # Discriminator: AND would have triggered the zero-match warning (AC5 of #86's spec).
+    # OR semantics → non-empty pool → no zero-match warning.
+    assert "no words match" not in reply.lower(), (
+        f"AC1: with 2 words in the OR pool the reply must NOT use the zero-match "
+        f"warning (which would prove AND was applied); got {reply!r}"
+    )
+    # The leading flag must echo back so the user can see it in the confirmation.
+    assert "--any" in reply, (
+        f"AC1: reply must echo the stored '--any' flag for confirmation; got {reply!r}"
+    )
+
+
+def test_cmd_focus_uppercase_any_recognised_lowercased(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC8 — "--ANY" recognised at position 0 and stored lowercased
+    _patch_bot(monkeypatch, conn)
+    _seed_translatable(conn, CHAT, ["horse"])
+    _attach(conn, CHAT, "horse", "type:body")
+
+    for token in ("--ANY", "--Any", "--aNy"):
+        vocab.set_focus_spec(conn, CHAT, None)  # reset between cases
+        asyncio.run(
+            bot.cmd_focus(
+                _make_command_update(), _make_context([token, "type:body"])
+            )
+        )
+
+        stored = vocab.get_focus_spec(conn, CHAT)
+        assert stored == "--any type:body", (
+            f"AC8: {token!r} at position 0 must be recognised and stored "
+            f"lowercased as '--any'; got {stored!r}"
+        )
+
+
+def test_cmd_focus_any_no_labels_malformed_no_write(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC7 / error — "/focus --any" alone → ⚠️ + no DB mutation
+    _patch_bot(monkeypatch, conn)
+    vocab.set_focus_spec(conn, CHAT, "type:body")  # seed a prior spec
+    before = vocab.get_focus_spec(conn, CHAT)
+
+    update = _make_command_update()
+    asyncio.run(bot.cmd_focus(update, _make_context(["--any"])))
+
+    after = vocab.get_focus_spec(conn, CHAT)
+    assert after == before, (
+        f"AC7: '/focus --any' (no labels) must NOT mutate focus_spec; "
+        f"before={before!r}, after={after!r}"
+    )
+    reply = _last_reply(update.message.reply_text)
+    assert reply.startswith("⚠️"), (
+        f"AC7: malformed reply must be ⚠️-prefixed; got {reply!r}"
+    )
+    assert "malformed label spec" in reply, (
+        f"AC7: reply must use the standard 'malformed label spec' phrasing; got {reply!r}"
+    )
+    assert "--any" in reply, (
+        f"AC7: spec mandates the malformed reply ends with the flag itself; got {reply!r}"
+    )
+
+
+def test_cmd_focus_any_malformed_following_token_no_write(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # error — parse_label_spec ValueError after --any → no write
+    _patch_bot(monkeypatch, conn)
+    vocab.set_focus_spec(conn, CHAT, "type:body")  # seed a prior spec
+    before = vocab.get_focus_spec(conn, CHAT)
+
+    update = _make_command_update()
+    # "pos:" is in test_vocab.py's list of malformed-token shapes (empty value
+    # after colon) — parse_label_spec must reject it, even after --any.
+    asyncio.run(bot.cmd_focus(update, _make_context(["--any", "pos:"])))
+
+    after = vocab.get_focus_spec(conn, CHAT)
+    assert after == before, (
+        f"error: malformed token after --any must NOT mutate focus_spec; "
+        f"before={before!r}, after={after!r}"
+    )
+    reply = _last_reply(update.message.reply_text)
+    assert reply.startswith("⚠️"), (
+        f"error: malformed reply must be ⚠️-prefixed; got {reply!r}"
+    )
+
+
+def test_cmd_focus_any_zero_match_persists_and_warns(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # edge — OR-mode + zero matches → spec STILL stored, but warns
+    _patch_bot(monkeypatch, conn)
+    vocab.ensure_chat(conn, CHAT)  # chat exists; zero words
+
+    update = _make_command_update()
+    asyncio.run(
+        bot.cmd_focus(
+            update, _make_context(["--any", "type:body", "type:medicine"])
+        )
+    )
+
+    # Spec is still stored even when nothing matches yet.
+    stored = vocab.get_focus_spec(conn, CHAT)
+    assert stored == "--any type:body type:medicine", (
+        f"edge: OR-mode zero-match focus must still be persisted; got {stored!r}"
+    )
+    # And the user is warned.
+    reply = _last_reply(update.message.reply_text)
+    assert "⚠️" in reply or "no words match" in reply.lower(), (
+        f"edge: OR-mode zero-match must surface the no-match warning; got {reply!r}"
+    )
+
+
+def test_cmd_focus_any_dedupes_following_tokens(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # edge — duplicate names after --any deduped via parse_label_spec
+    _patch_bot(monkeypatch, conn)
+    _seed_translatable(conn, CHAT, ["horse"])
+    _attach(conn, CHAT, "horse", "type:body")
+
+    asyncio.run(
+        bot.cmd_focus(
+            _make_command_update(),
+            _make_context(["--any", "type:body", "TYPE:body", "type:body"]),
+        )
+    )
+
+    stored = vocab.get_focus_spec(conn, CHAT)
+    assert stored == "--any type:body", (
+        f"edge: duplicate / mixed-case names after --any must collapse to a single "
+        f"'--any type:body'; got {stored!r}"
+    )
+
+
+def test_cmd_focus_no_args_echoes_any_spec_verbatim(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC3 — /focus echoes the stored spec verbatim, including --any
+    _patch_bot(monkeypatch, conn)
+    vocab.set_focus_spec(conn, CHAT, "--any type:body type:medicine")
+
+    update = _make_command_update()
+    asyncio.run(bot.cmd_focus(update, _make_context([])))
+
+    reply = _last_reply(update.message.reply_text)
+    assert "--any" in reply, (
+        f"AC3: echo must include the leading --any flag verbatim; got {reply!r}"
+    )
+    assert "type:body" in reply and "type:medicine" in reply, (
+        f"AC3: echo must include every label token verbatim; got {reply!r}"
+    )
+
+
+def test_cmd_focus_clear_after_any_clears_to_null(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC4 — /focus clear works regardless of prior mode (incl. OR)
+    _patch_bot(monkeypatch, conn)
+    vocab.set_focus_spec(conn, CHAT, "--any type:body type:medicine")
+    assert vocab.get_focus_spec(conn, CHAT) == "--any type:body type:medicine"  # precondition
+
+    asyncio.run(bot.cmd_focus(_make_command_update(), _make_context(["clear"])))
+
+    assert vocab.get_focus_spec(conn, CHAT) is None, (
+        f"AC4: /focus clear must NULL the column even when prior mode was OR; "
+        f"got {vocab.get_focus_spec(conn, CHAT)!r}"
+    )
+
+    # And a subsequent /focus echoes the unset state.
+    update2 = _make_command_update()
+    asyncio.run(bot.cmd_focus(update2, _make_context([])))
+    reply = _last_reply(update2.message.reply_text).lower()
+    assert "no focus set" in reply, (
+        f"AC4: after clear, /focus must echo 'no focus set'; got {reply!r}"
+    )
+
+
+def test_cmd_focus_no_flag_preserves_and_match_count(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC5 — no flag preserves AND semantics (zero-match warning when no overlap)
+    _patch_bot(monkeypatch, conn)
+    # Seed the same discriminating pool used for AC1's OR test, but with NO flag:
+    # AND of body+medicine = 0 → zero-match warning MUST fire (proves AND, not OR).
+    _seed_translatable(conn, CHAT, ["horse", "pill"])
+    _attach(conn, CHAT, "horse", "type:body")
+    _attach(conn, CHAT, "pill", "type:medicine")
+
+    update = _make_command_update()
+    asyncio.run(
+        bot.cmd_focus(update, _make_context(["type:body", "type:medicine"]))
+    )
+
+    reply = _last_reply(update.message.reply_text)
+    assert "no words match" in reply.lower(), (
+        f"AC5: without --any the AND filter yields zero matches and MUST surface "
+        f"the zero-match warning; got {reply!r}"
+    )
+    # And the stored spec must NOT carry --any (verifies no accidental flip).
+    stored = vocab.get_focus_spec(conn, CHAT)
+    assert stored == "type:body type:medicine", (
+        f"AC5: stored spec must NOT carry --any when none was supplied; got {stored!r}"
+    )
+
+
+# === bot.dispatch_push (mode forwarding) ====================================
+
+
+def test_dispatch_push_with_any_focus_forwards_mode_any(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC2 — dispatch_push reads OR-focus and forwards mode='any' to compose_push
+    _seed_settings_for_dispatch(conn)
+    vocab.add_word(conn, CHAT, "horse")
+    _attach(conn, CHAT, "horse", "type:body")
+    vocab.set_focus_spec(conn, CHAT, "--any type:body type:medicine")
+
+    spies = _patch_dispatch_runtime(
+        monkeypatch, conn, compose_return=(1, "horse", "the horse runs")
+    )
+
+    asyncio.run(bot.dispatch_push(CHAT))
+
+    assert spies["compose"].await_count == 1, (
+        f"compose_push must be called exactly once; got {spies['compose'].await_count}"
+    )
+    kwargs = spies["compose"].await_args.kwargs
+    assert kwargs.get("mode") == "any", (
+        f"AC2: dispatch_push must forward mode='any' to compose_push when "
+        f"focus carries --any; got mode={kwargs.get('mode')!r}"
+    )
+    assert kwargs.get("names") == ["type:body", "type:medicine"], (
+        f"AC2: dispatch_push must strip --any from the names list before "
+        f"forwarding; got names={kwargs.get('names')!r}"
+    )
+
+
+def test_dispatch_push_with_legacy_spec_forwards_mode_all(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC6 — pre-existing spec without --any → mode='all' (backward compat)
+    _seed_settings_for_dispatch(conn)
+    vocab.add_word(conn, CHAT, "horse")
+    _attach(conn, CHAT, "horse", "type:body")
+    # Simulate a focus_spec written by the pre-#112 codebase: no leading flag.
+    vocab.set_focus_spec(conn, CHAT, "type:body type:medicine")
+
+    spies = _patch_dispatch_runtime(
+        monkeypatch, conn, compose_return=(1, "horse", "the horse runs")
+    )
+
+    asyncio.run(bot.dispatch_push(CHAT))
+
+    kwargs = spies["compose"].await_args.kwargs
+    assert kwargs.get("mode") == "all", (
+        f"AC6: legacy spec (no --any) must default to mode='all' so pre-upgrade "
+        f"behaviour is preserved; got mode={kwargs.get('mode')!r}"
+    )
+
+
+# === bot.on_play_game (--any seeding) =======================================
+
+
+def test_on_play_game_seeds_any_mode_without_flag_token(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # AC11 — OR-focus → stash = ("any", [labels]), --any token NOT in names
+    _patch_bot(monkeypatch, conn)
+    matching = [f"m{i}" for i in range(games_module.MIN_VOCAB)]
+    _seed_translatable(conn, CHAT, matching)
+    for w in matching:
+        _attach(conn, CHAT, w, "type:body")
+    vocab.set_focus_spec(conn, CHAT, "--any type:body type:medicine")
+
+    update = _make_callback_update("pg:start")
+    asyncio.run(bot.on_play_game(update, _make_context([])))
+
+    stash = bot.pending_game_filters.get(CHAT)
+    assert stash == ("any", ["type:body", "type:medicine"]), (
+        f"AC11: OR-focus must seed the stash as ('any', [labels]) with --any "
+        f"stripped from the names list; got {stash!r}"
+    )
