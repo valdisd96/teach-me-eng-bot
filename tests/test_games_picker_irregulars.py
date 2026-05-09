@@ -158,7 +158,7 @@ def test_cmd_games_no_args_clears_pending_filter(
     _seed_translatable(
         conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
     )
-    bot.pending_game_filters[CHAT] = ["pos:noun"]  # leftover from prior /games <spec>
+    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])  # leftover from prior /games <spec>
     update = _make_command_update()
 
     asyncio.run(bot.cmd_games(update, _make_context([])))
@@ -240,8 +240,8 @@ def test_cmd_games_with_spec_picker_excludes_irr(
         f"AC3: gm:irr must NOT appear in the /games <spec> picker; got {cbs}"
     )
     # Today's stash behaviour preserved (sanity: AC3 says "stashed").
-    assert bot.pending_game_filters.get(CHAT) == ["pos:noun"], (
-        f"AC3: filter must be stashed; got {bot.pending_game_filters!r}"
+    assert bot.pending_game_filters.get(CHAT) == ("all", ["pos:noun"]), (
+        f"AC3: filter must be stashed as (mode, names); got {bot.pending_game_filters!r}"
     )
 
 

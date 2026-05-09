@@ -26,6 +26,7 @@ import sqlite3
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from fsrs import Rating
@@ -128,9 +129,10 @@ import_pending: dict[int, float] = {}
 games: dict[int, games_module.Game] = {}
 # In-flight /irregulars sessions: same one-per-chat semantics as `games`.
 irregulars: dict[int, irregular_module.Game] = {}
-# Label spec captured between `/games <spec>` and the direction-picker tap.
-# Empty / missing entry means "no filter". Latest /games wins; popped on game start.
-pending_game_filters: dict[int, list[str]] = {}
+# Label spec captured between `/games <spec>` (or focus seed via on_play_game)
+# and the direction-picker tap, as `(mode, names)` so OR-mode focus survives the
+# round-trip. Missing entry means "no filter". Latest write wins; popped on game start.
+pending_game_filters: dict[int, tuple[Literal["all", "any"], list[str]]] = {}
 
 GAMES_NEED_VOCAB = "add at least 4 words to your vocab first"
 GAMES_IN_PROGRESS = "you have a game in progress"
@@ -229,10 +231,12 @@ async def dispatch_push(chat_id: int) -> None:
     """Compose a scheduled push and send it with rating buttons."""
     assert conn is not None and app is not None
     focus_text = vocab.get_focus_spec(conn, chat_id)
-    names = focus_text.split() if focus_text else None
+    mode, names = vocab.split_focus_spec(focus_text)
+    names = names or None
     try:
         composed = await sched_module.compose_push(
-            conn, chat_id, llm_chat=llm.chat, names=names, rng=random.Random()
+            conn, chat_id, llm_chat=llm.chat,
+            names=names, mode=mode, rng=random.Random(),
         )
     except Exception as e:  # noqa: BLE001 — never let a push crash the scheduler
         log.error("compose_push failed for chat %s: %s", chat_id, e)
@@ -294,7 +298,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
-    ("focus", "Set a sticky label spec scoping pushes + post-/forgot game button (e.g. /focus pos:noun); /focus clear removes it; /focus echoes current"),
+    ("focus", "Set a sticky label spec scoping pushes + post-/forgot game button (e.g. /focus pos:noun, AND across tokens; prepend --any for OR, e.g. /focus --any type:body type:medicine); /focus clear removes it; /focus echoes current"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab count, and a short model bench"),
 ]
@@ -769,11 +773,11 @@ async def cmd_labels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Set, clear, or echo the chat's sticky focus spec.
 
-    Three forms:
-      * `/focus`                  → echo current focus or "no focus set".
-      * `/focus clear`            → clear the focus (column → NULL).
-      * `/focus pos:noun ...`     → store the normalised spec for pushes
-                                    and the post-`❌ forgot` 🎮 button.
+    Forms:
+      * `/focus`                       → echo current focus or "no focus set".
+      * `/focus clear`                 → clear the focus (column → NULL).
+      * `/focus pos:noun ...`          → AND across labels.
+      * `/focus --any pos:noun type:x` → OR across labels (leading flag).
     """
     if not is_allowed(update):
         return
@@ -793,15 +797,28 @@ async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("focus cleared")
         return
 
+    mode: Literal["all", "any"] = "all"
+    rest = args
+    if args[0].strip().lower() == vocab.FOCUS_ANY_FLAG:
+        mode = "any"
+        rest = args[1:]
+        if not rest:
+            await update.message.reply_text(
+                f"⚠️ malformed label spec: {vocab.FOCUS_ANY_FLAG}"
+            )
+            return
+
     try:
-        names = vocab.parse_label_spec(args)
+        names = vocab.parse_label_spec(rest)
     except ValueError as e:
         await update.message.reply_text(f"⚠️ {e}")
         return
 
-    spec_text = " ".join(names)
+    spec_text = (
+        f"{vocab.FOCUS_ANY_FLAG} {' '.join(names)}" if mode == "any" else " ".join(names)
+    )
     vocab.set_focus_spec(conn, chat_id, spec_text)
-    matches = vocab.words_matching_labels(conn, chat_id, names)
+    matches = vocab.words_matching_labels(conn, chat_id, names, mode=mode)
     if not matches:
         await update.message.reply_text(
             f"focus set: {spec_text}\n⚠️ no words match yet"
@@ -834,9 +851,11 @@ def _playable_rows(
     conn_: sqlite3.Connection,
     chat_id: int,
     names: list[str] | None = None,
+    *,
+    mode: Literal["all", "any"] = "all",
 ) -> list[sqlite3.Row]:
     rows = (
-        vocab.words_matching_labels(conn_, chat_id, names)
+        vocab.words_matching_labels(conn_, chat_id, names, mode=mode)
         if names
         else vocab.list_words(conn_, chat_id)
     )
@@ -889,7 +908,7 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if len(_playable_rows(conn, chat_id, names)) < games_module.MIN_VOCAB:
             await update.message.reply_text(GAMES_NO_LABEL_MATCH)
             return
-        pending_game_filters[chat_id] = names
+        pending_game_filters[chat_id] = ("all", names)
         # With a spec, the picker is vocab-only — the spec is meaningless
         # for the static irregular-verb deck.
         kb = InlineKeyboardMarkup([[
@@ -1089,8 +1108,12 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if chat_id in games:
         await query.message.reply_text(GAMES_IN_PROGRESS)
         return
-    names = pending_game_filters.get(chat_id) or None
-    rows = _playable_rows(conn, chat_id, names)
+    stash = pending_game_filters.get(chat_id)
+    if stash:
+        mode, names = stash
+    else:
+        mode, names = "all", None
+    rows = _playable_rows(conn, chat_id, names, mode=mode)
     if len(rows) < games_module.MIN_VOCAB:
         await query.message.reply_text(
             GAMES_NO_LABEL_MATCH if names else GAMES_NEED_VOCAB
@@ -1121,14 +1144,15 @@ async def on_play_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.message.reply_text(GAMES_IN_PROGRESS)
         return
     focus_text = vocab.get_focus_spec(conn, chat_id)
-    names = focus_text.split() if focus_text else None
-    if len(_playable_rows(conn, chat_id, names)) < games_module.MIN_VOCAB:
+    mode, names_list = vocab.split_focus_spec(focus_text)
+    names = names_list or None
+    if len(_playable_rows(conn, chat_id, names, mode=mode)) < games_module.MIN_VOCAB:
         await query.message.reply_text(
             GAMES_NO_LABEL_MATCH if names else GAMES_NEED_VOCAB
         )
         return
     if names:
-        pending_game_filters[chat_id] = names
+        pending_game_filters[chat_id] = (mode, names)
     else:
         pending_game_filters.pop(chat_id, None)
     kb = InlineKeyboardMarkup([[

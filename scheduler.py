@@ -22,7 +22,7 @@ import json
 import logging
 import random
 import sqlite3
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -103,15 +103,17 @@ async def compose_push(
     *,
     llm_chat: LlmChat,
     names: list[str] | None = None,
+    mode: Literal["all", "any"] = "all",
     rng: random.Random | None = None,
     now: datetime.datetime | None = None,
     retries: int = 1,
 ) -> tuple[int, str, str] | None:
     """Select a word and prompt the LLM. Returns (word_id, word, text) or None.
 
-    `names`, when non-empty, restricts the candidate pool to words tagged with
-    all of those labels (AND, via `vocab.select_word`); a filter that yields
-    zero matches returns None — the caller logs and skips the push.
+    `names`, when non-empty, restricts the candidate pool via
+    `vocab.select_word`. `mode="all"` (default) requires every label;
+    `mode="any"` requires at least one. A filter that yields zero matches
+    returns None — the caller logs and skips the push.
 
     Retries once if the word doesn't appear literally in the output. On final
     failure the text is returned anyway — rare with short vocab prompts and
@@ -122,7 +124,9 @@ async def compose_push(
     ).fetchone()
     if chat_row is None:
         return None
-    picked = vocab.select_word(conn, chat_id, names=names, rng=rng, now=now)
+    picked = vocab.select_word(
+        conn, chat_id, names=names, mode=mode, rng=rng, now=now
+    )
     if picked is None:
         return None
 
