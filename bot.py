@@ -48,6 +48,7 @@ import games as games_module
 import irregular_verbs as irregular_module
 import llm
 import prompts
+import repeat_game as repeat_module
 import scheduler as sched_module
 import sysinfo
 import translator
@@ -129,6 +130,8 @@ import_pending: dict[int, float] = {}
 games: dict[int, games_module.Game] = {}
 # In-flight /irregulars sessions: same one-per-chat semantics as `games`.
 irregulars: dict[int, irregular_module.Game] = {}
+# In-flight "Repeat (typed)" sessions: same one-per-chat semantics as `games`.
+repeat_games: dict[int, repeat_module.Game] = {}
 # Label spec captured between `/games <spec>` (or focus seed via on_play_game)
 # and the direction-picker tap, as `(mode, names)` so OR-mode focus survives the
 # round-trip. Missing entry means "no filter". Latest write wins; popped on game start.
@@ -145,6 +148,12 @@ IRREGULARS_IN_PROGRESS = "you have an irregular-verbs game in progress"
 IRREGULARS_PROMPT_HINT = (
     'Reply with the past simple and past participle, e.g. "went / gone".'
 )
+REPEAT_IN_PROGRESS = "you have a repeat game in progress"
+REPEAT_NOT_ENOUGH = (
+    f"not enough remembered words yet — keep practising "
+    f"(need at least {repeat_module.N_ROUNDS})"
+)
+REPEAT_PROMPT_HINT = "Type the translation."
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -314,7 +323,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("tr", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Pick a game: Word -> Translation, Translation -> Word (vocab quiz, 1-10 rounds; optional label filter, AND across tokens), or Irregular verbs (past simple + past participle, 1-10 rounds). Use /games cancel to end an in-flight game so a new one can start."),
+    ("games", "Pick a game: Word -> Translation, Translation -> Word (vocab quiz, 1-10 rounds; optional label filter), Irregular verbs (1-10 rounds), or Repeat typed (remembered-only words, 5 rounds, random direction). Use /games cancel to end an in-flight game."),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -934,9 +943,12 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # /games cancel — must run BEFORE the in-progress short-circuit, otherwise
     # GAMES_IN_PROGRESS would fire and the user could never cancel.
     if len(spec_args) == 1 and spec_args[0].strip().lower() == "cancel":
-        had_game = chat_id in games or chat_id in irregulars
+        had_game = (
+            chat_id in games or chat_id in irregulars or chat_id in repeat_games
+        )
         games.pop(chat_id, None)
         irregulars.pop(chat_id, None)
+        repeat_games.pop(chat_id, None)
         pending_game_filters.pop(chat_id, None)
         await update.message.reply_text(
             GAMES_CANCELLED if had_game else GAMES_NOTHING_TO_CANCEL
@@ -947,6 +959,9 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if chat_id in irregulars:
         await update.message.reply_text(IRREGULARS_IN_PROGRESS)
+        return
+    if chat_id in repeat_games:
+        await update.message.reply_text(REPEAT_IN_PROGRESS)
         return
     if spec_args:
         try:
@@ -968,6 +983,7 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pending_game_filters.pop(chat_id, None)
         rows = [
             [InlineKeyboardButton("Irregular verbs", callback_data="gm:irr")],
+            [InlineKeyboardButton("Repeat (typed)", callback_data="gm:repeat")],
         ]
         # Vocab buttons only when there's enough translatable vocab to play —
         # otherwise the irregular verbs game stays reachable from the same picker.
@@ -986,6 +1002,18 @@ def _format_irregular_prompt(game: irregular_module.Game) -> str:
         f"Round {game.current_round + 1}/{game.n_rounds}: {rd.base}\n"
         f"{IRREGULARS_PROMPT_HINT}"
     )
+
+
+def _format_repeat_prompt(game: repeat_module.Game) -> str:
+    rd = game.current()
+    return (
+        f"Round {game.current_round + 1}/{game.n_rounds}: {rd.prompt}\n"
+        f"{REPEAT_PROMPT_HINT}"
+    )
+
+
+async def _send_repeat_round(bot, chat_id: int, game: repeat_module.Game) -> None:
+    await bot.send_message(chat_id=chat_id, text=_format_repeat_prompt(game))
 
 
 # --- callback handlers ------------------------------------------------------
@@ -1146,10 +1174,35 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if chat_id in irregulars:
             await query.message.reply_text(IRREGULARS_IN_PROGRESS)
             return
+        if chat_id in repeat_games:
+            await query.message.reply_text(REPEAT_IN_PROGRESS)
+            return
         rounds = irregular_module.draw_rounds(rng=random.Random())
         game = irregular_module.Game(chat_id=chat_id, rounds=rounds)
         irregulars[chat_id] = game
         await query.message.reply_text(_format_irregular_prompt(game))
+        return
+    if query.data == "gm:repeat":
+        if chat_id in games:
+            await query.message.reply_text(GAMES_IN_PROGRESS)
+            return
+        if chat_id in irregulars:
+            await query.message.reply_text(IRREGULARS_IN_PROGRESS)
+            return
+        if chat_id in repeat_games:
+            await query.message.reply_text(REPEAT_IN_PROGRESS)
+            return
+        remembered_ids = vocab.remembered_word_ids(conn, chat_id)
+        all_rows = vocab.list_words(conn, chat_id)
+        pool = [r for r in all_rows if r["id"] in remembered_ids]
+        try:
+            rounds = repeat_module.draw_rounds(pool, rng=random.Random())
+        except ValueError:
+            await query.message.reply_text(REPEAT_NOT_ENOUGH)
+            return
+        game = repeat_module.Game(chat_id=chat_id, rounds=rounds)
+        repeat_games[chat_id] = game
+        await _send_repeat_round(context.bot, chat_id, game)
         return
     if query.data == "gm:wt":
         direction = "wt"
@@ -1160,6 +1213,12 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if chat_id in games:
         await query.message.reply_text(GAMES_IN_PROGRESS)
+        return
+    if chat_id in irregulars:
+        await query.message.reply_text(IRREGULARS_IN_PROGRESS)
+        return
+    if chat_id in repeat_games:
+        await query.message.reply_text(REPEAT_IN_PROGRESS)
         return
     stash = pending_game_filters.get(chat_id)
     if stash:
@@ -1327,6 +1386,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             irregulars.pop(chat_id, None)
         else:
             await update.message.reply_text(_format_irregular_prompt(irr_game))
+        return
+
+    # Branch 2b: repeat (typed) game in progress — interpret plain text as the
+    # round answer, grade case-insensitively, record outcome.
+    rep_game = repeat_games.get(chat_id)
+    if rep_game is not None and not rep_game.done:
+        rd = rep_game.current()
+        correct = repeat_module.grade_answer(user_text, rd)
+        if correct:
+            reply = f"✅ {rd.expected}"
+        else:
+            reply = f"❌ correct: {rd.expected}"
+        repeat_module.apply_answer(rep_game, correct, source_word=rd.source_word)
+        try:
+            vocab.record_outcome(
+                conn, rd.word_id, correct=correct, weight=0.5, source="game"
+            )
+        except KeyError:
+            log.warning("record_outcome: unknown word_id %s", rd.word_id)
+        await update.message.reply_text(reply)
+        if rep_game.done:
+            await update.message.reply_text(
+                repeat_module.format_result(
+                    rep_game.score, rep_game.n_rounds, rep_game.wrong
+                )
+            )
+            repeat_games.pop(chat_id, None)
+        else:
+            await update.message.reply_text(_format_repeat_prompt(rep_game))
         return
 
     # Branch 3: just-talk. Inject vocab words into the system prompt so the
