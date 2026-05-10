@@ -26,7 +26,7 @@ EXPECTED_NON_GAMES_ENTRIES: list[tuple[str, str]] = [
     ("help", "Show this help message"),
     ("add", "Add a word or phrase to this chat's vocab"),
     ("remove", "Remove a word or phrase from vocab"),
-    ("list", "List vocab words (optionally filter by a label spec, AND across tokens)"),
+    ("list", "List vocab words (every row shows its labels; optional label spec filter, AND across tokens; prepend --any for OR)"),
     ("import", "Bulk-import vocab from a CSV file (one word per row)"),
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),

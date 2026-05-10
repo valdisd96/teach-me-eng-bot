@@ -224,6 +224,27 @@ def split_point(text: str, max_len: int) -> int:
     return max_len
 
 
+def _chunk_lines(lines: list[str], max_len: int, header: str) -> list[str]:
+    """Pack `lines` into chunks where each chunk fits within `max_len`.
+
+    The first chunk is prefixed with `header` (counted in the budget); later
+    chunks contain only line content. Lines are never split mid-line: a single
+    line longer than `max_len` is emitted on its own chunk regardless. With an
+    empty `lines` the result is a single chunk holding just the header.
+    """
+    chunks: list[str] = []
+    current = header
+    for line in lines:
+        sep_len = 1 if current else 0  # the joining "\n"
+        if current and len(current) + sep_len + len(line) > max_len:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    chunks.append(current)
+    return chunks
+
+
 # --- push dispatch (called by the scheduler) --------------------------------
 
 
@@ -289,7 +310,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("help", "Show this help message"),
     ("add", "Add a word or phrase to this chat's vocab"),
     ("remove", "Remove a word or phrase from vocab"),
-    ("list", "List vocab words (optionally filter by a label spec, AND across tokens)"),
+    ("list", "List vocab words (every row shows its labels; optional label spec filter, AND across tokens; prepend --any for OR)"),
     ("import", "Bulk-import vocab from a CSV file (one word per row)"),
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
@@ -440,28 +461,33 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     assert conn is not None
     chat_id = update.effective_chat.id
-    spec_args = context.args or []
-    if spec_args:
+    args = context.args or []
+
+    mode: Literal["all", "any"] = "all"
+    rest = args
+    if args and args[0].strip().lower() == vocab.FOCUS_ANY_FLAG:
+        mode = "any"
+        rest = args[1:]
+        if not rest:
+            await update.message.reply_text(
+                f"⚠️ malformed label spec: {vocab.FOCUS_ANY_FLAG}"
+            )
+            return
+
+    if rest:
         try:
-            names = vocab.parse_label_spec(spec_args)
+            names = vocab.parse_label_spec(rest)
         except ValueError as e:
             await update.message.reply_text(f"⚠️ {e}")
             return
-        rows = vocab.words_matching_labels(conn, chat_id, names)
+        rows = vocab.words_matching_labels(conn, chat_id, names, mode=mode)
         if not rows:
             await update.message.reply_text("no words match those labels")
             return
-        header = f"Vocab ({len(rows)}) matching {' '.join(names)}:"
-        scores = vocab.compute_scores(rows)
-        lines = [
-            f"• {r['text']} (seen {r['mention_count']}×, score {s})"
-            + (
-                f" — {', '.join(labels)}"
-                if (labels := vocab.labels_for_word(conn, r["id"]))
-                else ""
-            )
-            for r, s in zip(rows, scores)
-        ]
+        spec_text = (
+            f"{vocab.FOCUS_ANY_FLAG} {' '.join(names)}" if mode == "any" else " ".join(names)
+        )
+        header = f"Vocab ({len(rows)}) matching {spec_text}:"
     else:
         rows = vocab.list_words(conn, chat_id)
         if not rows:
@@ -470,15 +496,20 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         header = f"Vocab ({len(rows)}):"
-        scores = vocab.compute_scores(rows)
-        lines = [
-            f"• {r['text']} (seen {r['mention_count']}×, score {s})"
-            for r, s in zip(rows, scores)
-        ]
-    body = "\n".join(lines)
-    if len(body) > MAX_MSG_LEN - len(header) - 32:
-        body = body[: MAX_MSG_LEN - len(header) - 32] + "\n…"
-    await update.message.reply_text(f"{header}\n{body}")
+
+    label_map = vocab.labels_for_words_in_chat(conn, chat_id)
+    scores = vocab.compute_scores(rows)
+    lines = [
+        f"• {r['text']} (seen {r['mention_count']}×, score {s})"
+        + (
+            f" — {', '.join(labels)}"
+            if (labels := label_map.get(r["id"]))
+            else ""
+        )
+        for r, s in zip(rows, scores)
+    ]
+    for chunk in _chunk_lines(lines, MAX_MSG_LEN, header):
+        await update.message.reply_text(chunk)
 
 
 async def cmd_import(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

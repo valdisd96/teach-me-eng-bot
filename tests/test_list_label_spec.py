@@ -73,11 +73,10 @@ def _attach(conn: sqlite3.Connection, chat_id: int, word: str, label: str) -> No
 
 def test_cmd_list_no_args_unfiltered_format(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC2 — unfiltered output keeps today's per-row format, no label suffix
+) -> None:  # unfiltered output keeps base per-row format; labels now appear (issue #118)
     _patch_conn(monkeypatch, conn)
     vocab.add_word(conn, CHAT, "horse")
     vocab.add_word(conn, CHAT, "pill")
-    # Attach labels — they MUST NOT bleed into unfiltered output.
     _attach(conn, CHAT, "horse", "pos:noun")
     _attach(conn, CHAT, "pill", "type:medicine")
 
@@ -85,16 +84,18 @@ def test_cmd_list_no_args_unfiltered_format(
     asyncio.run(bot.cmd_list(update, _make_context([])))
 
     reply = _last_reply(update)
-    # Per-row format from spec: "• <text> (seen N×, score S)".
+    # Base per-row format preserved: "• <text> (seen N×, score S)".
     for word in ("horse", "pill"):
         assert f"• {word} (seen " in reply, (
             f"unfiltered row format must be '• {word} (seen N×, score S)'; got {reply!r}"
         )
         assert "score " in reply, f"row format must include 'score'; got {reply!r}"
-    # Unfiltered output must not append the labels suffix introduced for the filtered branch.
-    assert " — " not in reply, (
-        "unfiltered rows must NOT carry the filtered branch's '— labels…' suffix; "
-        f"got {reply!r}"
+    # Per issue #118 the unfiltered branch now appends each row's labels too.
+    assert " — pos:noun" in reply, (
+        f"unfiltered row for 'horse' must end with the '— pos:noun' suffix; got {reply!r}"
+    )
+    assert " — type:medicine" in reply, (
+        f"unfiltered row for 'pill' must end with the '— type:medicine' suffix; got {reply!r}"
     )
 
 
@@ -247,12 +248,12 @@ def test_cmd_list_filter_rows_show_label_suffix(
     assert "type:animal" in line, f"row must list 'type:animal'; got {line!r}"
 
 
-def test_cmd_list_filter_unfiltered_rows_no_label_suffix(
+def test_cmd_list_unfiltered_rows_show_label_suffix(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC4 — unfiltered output stays untouched (no label suffix on rows)
+) -> None:  # issue #118 — unfiltered output also appends '— labels' for labelled rows
     _patch_conn(monkeypatch, conn)
     vocab.add_word(conn, CHAT, "horse")
-    _attach(conn, CHAT, "horse", "pos:noun")  # word DOES have a label
+    _attach(conn, CHAT, "horse", "pos:noun")
     _attach(conn, CHAT, "horse", "type:animal")
 
     update = _make_command_update()
@@ -261,9 +262,11 @@ def test_cmd_list_filter_unfiltered_rows_no_label_suffix(
     reply = _last_reply(update)
     line = next((ln for ln in reply.splitlines() if "horse" in ln), None)
     assert line is not None, f"horse row missing; got {reply!r}"
-    assert " — " not in line, (
-        "unfiltered rows must NOT carry the '— labels' suffix even when the word has labels; "
-        f"got {line!r}"
+    assert " — " in line, (
+        f"unfiltered row for a labelled word must carry the '— labels' suffix; got {line!r}"
+    )
+    assert "pos:noun" in line and "type:animal" in line, (
+        f"row must list every attached label; got {line!r}"
     )
 
 

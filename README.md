@@ -17,7 +17,7 @@ A [python-telegram-bot](https://python-telegram-bot.org) app talking to any Open
 | `/clear` | Resets the chat's LLM history. Vocab and settings untouched. |
 | `/add <word or phrase>` | Add a word to this chat's vocab. |
 | `/remove <word or phrase>` | Remove by exact match. |
-| `/list [<spec>...]` | List vocab (least-mentioned first). With one or more label tokens, restrict to words tagged with **all** of them (AND). See [Labels](#labels). |
+| `/list [--any] [<spec>...]` | List vocab (least-mentioned first); every row shows its labels. With one or more label tokens, restrict to words tagged with **all** of them (AND); prepend `--any` for OR. Long lists spill across multiple Telegram messages. See [Labels](#labels). |
 | `/import` | Bulk-import from a CSV upload (5-min window, capped at 5000 rows / 1 MB). Columns: `text` (required), optional `translation`, optional `labels` (`;`-separated names). The `text,translation,labels` header opts in to the three-column round-trip; bare-list and `text,translation` formats remain accepted. Existing words preserved; in-file duplicates skipped; label sets are merged additively. FSRS state not imported. |
 | `/export` | Sends the chat's vocab back as `vocab-YYYY-MM-DD.csv`, alphabetical, with a `text,translation,labels` header. The `labels` column lists each word's labels joined by `;`. FSRS state not exported. |
 | `/resetvocab` | Wipe vocabulary (with a confirm button). |
@@ -49,7 +49,7 @@ Labels are per-chat tags you attach to vocab words. They let you slice your voca
 
 **Filters.** Three commands accept the same spec syntax as a filter; in every case the semantics are **AND across tokens** (words must carry every named label).
 
-- `/list <spec>...` — show only words matching the filter; each row also displays its labels.
+- `/list [--any] <spec>...` — show only words matching the filter; AND across tokens by default, OR when prefixed with `--any`. Every row displays its labels regardless of whether a filter is active.
 - `/games <spec>...` — restrict the quiz pool to matching words; the chosen filter survives the direction-picker tap. The pool still needs ≥4 translatable rows or the bot replies `no words match those labels — try fewer filters or /label more words`.
 - `/focus <spec>...` — **sticky** per-chat filter that scopes scheduled pushes and the **🎮 Play game** button under the `❌ forgot` explanation. `/focus clear` removes it; `/focus` with no args echoes the current setting. `/list` and `/games` are unaffected by `/focus` — they use only their own inline `<spec>`.
 
