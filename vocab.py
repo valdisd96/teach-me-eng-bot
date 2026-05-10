@@ -401,6 +401,62 @@ def highlight_matches(text: str, words: list[str]) -> str:
     return "".join(out)
 
 
+PUSH_HEADER_PREFIX = "\U0001F4CC"  # 📌 — anchors the chosen vocab word above the snippet.
+
+
+def mark_target_word(text: str, target: str) -> str:
+    """HTML-escape `text` and wrap case-insensitive matches of `target` in <b>…</b>.
+
+    Unlike `highlight_matches`, only the single `target` word/phrase is marked —
+    other vocab words that happen to appear in the snippet stay plain. Markdown
+    bold markers (`**x**` / `__x__`) are stripped first so they never reach
+    Telegram's HTML renderer literally. Empty `text` short-circuits to "".
+    Empty `target` returns the HTML-escaped text with no bolding. Output is
+    safe to send with Telegram's HTML parse mode.
+    """
+    if not text:
+        return ""
+    text = _MD_BOLD_RE.sub(lambda m: m.group(1) or m.group(2), text)
+    if not target:
+        return html.escape(text)
+    haystack = text.lower()
+    needle = target.lower()
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while True:
+        idx = haystack.find(needle, i)
+        if idx == -1:
+            break
+        end = idx + len(needle)
+        spans.append((idx, end))
+        i = end
+    out: list[str] = []
+    cursor = 0
+    for s, e in spans:
+        out.append(html.escape(text[cursor:s]))
+        out.append("<b>")
+        out.append(html.escape(text[s:e]))
+        out.append("</b>")
+        cursor = e
+    out.append(html.escape(text[cursor:]))
+    return "".join(out)
+
+
+def format_push_body(target: str, text: str) -> str:
+    """Compose `📌 <b>target</b>` header + a body where `target` is bolded inline.
+
+    The header anchors the chosen vocab word so the user can identify it at a
+    glance even when the snippet uses an inflected form or sits inside dense
+    prose. Header and body are separated by a blank line. When `target` is
+    empty the header is omitted (defensive — production callers always have a
+    word). Both halves are HTML-safe.
+    """
+    body = mark_target_word(text, target)
+    if not target:
+        return body
+    return f"{PUSH_HEADER_PREFIX} <b>{html.escape(target)}</b>\n\n{body}"
+
+
 def bump_mentions(conn: sqlite3.Connection, word_ids: list[int]) -> None:
     """Increment mention_count and update last_used_at for the given word ids."""
     if not word_ids:

@@ -286,8 +286,7 @@ async def dispatch_push(chat_id: int) -> None:
             ),
         ]]
     )
-    chat_words = [r["text"] for r in vocab.list_words(conn, chat_id)]
-    formatted = vocab.highlight_matches(text, chat_words)
+    formatted = vocab.format_push_body(word, text)
     try:
         msg = await app.bot.send_message(
             chat_id=chat_id, text=formatted, reply_markup=kb, parse_mode="HTML"
@@ -1019,14 +1018,15 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not explanation:
         return
     chat_id = update.effective_chat.id
-    # Reuse the rated word's text for the transcript tag and to highlight it inline.
+    # Reuse the rated word's text for the transcript tag and to mark it inline
+    # under the 📌-header that matches the push format. Empty target_word when
+    # the row vanished between rating and explanation suppresses the header.
     row = conn.execute(
         "SELECT text FROM words WHERE id = ?", (word_id,)
     ).fetchone()
     tag_word = row["text"] if row is not None else "?"
-    formatted = vocab.highlight_matches(
-        explanation, [tag_word] if row is not None else []
-    )
+    target_word = row["text"] if row is not None else ""
+    formatted = vocab.format_push_body(target_word, explanation)
 
     # Tack on a single-word translation into the chat's configured target
     # language. A failure here mustn't drop the explanation itself.
