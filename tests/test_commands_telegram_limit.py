@@ -36,7 +36,7 @@ EXPECTED_NON_GAMES_ENTRIES: list[tuple[str, str]] = [
     ("labels", "List every label in this chat with its attached-word count"),
     ("focus", "Set a sticky label spec scoping pushes + post-/forgot game button (e.g. /focus pos:noun, AND across tokens; prepend --any for OR, e.g. /focus --any type:body type:medicine); /focus clear removes it; /focus echoes current"),
     ("clear", "Reset the chat history (LLM memory)"),
-    ("status", "Show host diagnostics, vocab count, and a short model bench"),
+    ("status", "Show host diagnostics, vocab/labels/focus, and LLM backend usage"),
 ]
 
 

@@ -27,7 +27,7 @@ A [python-telegram-bot](https://python-telegram-bot.org) app talking to any Open
 | `/unlabel <word> <spec>...` | Detach the named labels from a vocab word. |
 | `/labels` | List every label in this chat with its attached-word count. |
 | `/focus [<spec>...]` | Sticky per-chat label spec that scopes scheduled pushes and the post-`❌ forgot` 🎮 button. `/focus pos:noun` sets it; `/focus clear` removes it; `/focus` echoes the current value. |
-| `/status` | Host diagnostics, vocab count, LLM endpoint health, short bench. |
+| `/status` | Three sections — System (host diagnostics), Vocab (word + label counts, current `/focus`), Model (backend health + usage / quota when on OpenRouter). |
 
 Plain (non-slash) messages hit the LLM with vocab injected into the system prompt as soft hints. Words that appear literally in the reply bump their `mention_count` and get freshness credit.
 

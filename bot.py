@@ -321,7 +321,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("labels", "List every label in this chat with its attached-word count"),
     ("focus", "Set a sticky label spec scoping pushes + post-/forgot game button (e.g. /focus pos:noun, AND across tokens; prepend --any for OR, e.g. /focus --any type:body type:medicine); /focus clear removes it; /focus echoes current"),
     ("clear", "Reset the chat history (LLM memory)"),
-    ("status", "Show host diagnostics, vocab count, and a short model bench"),
+    ("status", "Show host diagnostics, vocab/labels/focus, and LLM backend usage"),
 ]
 
 HELP_TEXT = (
@@ -382,8 +382,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     free, total = sysinfo.read_disk_free("/")
     deploy_sha = sysinfo.read_deploy_sha() or "unknown"
     words = vocab.count_words(conn, chat_id)
+    labels = vocab.count_labels(conn, chat_id)
+    focus_spec = vocab.get_focus_spec(conn, chat_id) or "none"
     server = await llm.health()
-    bench_line = await llm.bench()
+    usage_line = await llm.usage()
 
     await update.message.reply_text(
         "System\n"
@@ -394,13 +396,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"  Temp: {temp}\n"
         f"  Disk /: {sysinfo.format_bytes(free)} free / "
         f"{sysinfo.format_bytes(total)}\n"
-        f"  Vocab: {words} words\n"
+        "\n"
+        "Vocab\n"
+        f"  Words: {words}\n"
+        f"  Labels: {labels}\n"
+        f"  Focus: {focus_spec}\n"
         "\n"
         "Model\n"
-        f"  Name: {llm.MODEL}\n"
-        f"  Endpoint: {llm.LLAMA_URL}\n"
         f"  Server: {server}\n"
-        f"  Bench: {bench_line}"
+        f"  Usage: {usage_line}"
     )
 
 

@@ -11,6 +11,7 @@ Entry points:
   * `chat(messages)` — non-streaming one-shot, used by the push scheduler where
     we wait for the full reply before sending.
   * `health()` — status string for /status.
+  * `usage()` — single-line backend usage / quota summary for /status.
 
 SSE parsing and non-stream response parsing are factored into pure helpers so
 they can be unit-tested without standing up an HTTP mock.
@@ -18,12 +19,10 @@ they can be unit-tested without standing up an HTTP mock.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import time
 from dataclasses import dataclass
-from typing import AsyncIterator, Awaitable, Callable
+from typing import AsyncIterator
 
 import httpx
 
@@ -34,6 +33,7 @@ HEALTH_URL = f"{LLAMA_BASE}/health"
 MODEL = "gemma4"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_AUTH_KEY_URL = "https://openrouter.ai/api/v1/auth/key"
 DEFAULT_OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"
 
 _DONE = "[DONE]"
@@ -170,34 +170,40 @@ async def health() -> str:
         return f"unreachable ({e})"
 
 
-_BENCH_PROMPT = [{"role": "user", "content": "Reply with one short sentence."}]
+async def usage() -> str:
+    """One-line backend usage / quota summary for /status.
 
+    For the local llama backend there is no notion of quota — returns
+    ``"n/a"`` without making any network call. For OpenRouter, GETs
+    ``/api/v1/auth/key`` with the configured Bearer header and renders
+    ``$<usage> used / limit: <limit-or-unlimited>, rate <r> req / <interval>``.
 
-async def bench(
-    *,
-    chat_fn: Callable[..., Awaitable[str]] | None = None,
-    timeout: float = 30.0,
-    now: Callable[[], float] = time.monotonic,
-) -> str:
-    """Run a tiny prompt through the model and return a one-line perf summary.
-
-    On timeout returns ``"model not responding"``; on other errors returns a
-    short ``"error: <ExceptionType>"`` string. Injected collaborators keep this
-    unit-testable without an HTTP server.
+    Transport errors and non-2xx responses are caught and returned as
+    ``"unavailable (<reason>)"`` so `/status` keeps rendering. A misconfigured
+    backend (``LLM_BACKEND=openrouter`` with no key) raises from
+    ``_get_backend`` — parity with `health()`.
     """
-    if chat_fn is None:
-        chat_fn = chat
-    t0 = now()
+    backend = _get_backend()
+    if backend.name != "openrouter":
+        return "n/a"
     try:
-        text = await asyncio.wait_for(
-            chat_fn(_BENCH_PROMPT, max_tokens=32, temperature=0.2),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
-        return "model not responding"
-    except Exception as e:  # noqa: BLE001 — surface the class name to the user
-        return f"error: {type(e).__name__}"
-    elapsed = now() - t0
-    chars = len(text)
-    tok_per_s = (chars / 4) / elapsed if elapsed > 0 else 0.0
-    return f"{chars} chars in {elapsed:.1f}s (~{tok_per_s:.1f} tok/s)"
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(OPENROUTER_AUTH_KEY_URL, headers=backend.headers)
+            r.raise_for_status()
+            data = r.json().get("data") or {}
+    except Exception as e:  # noqa: BLE001 — surface short reason to /status
+        return f"unavailable ({type(e).__name__})"
+    spent = data.get("usage")
+    limit = data.get("limit")
+    rate = data.get("rate_limit") or {}
+    spent_str = f"${spent:.3f}" if isinstance(spent, (int, float)) else "$?"
+    limit_str = (
+        f"${limit:.2f}" if isinstance(limit, (int, float)) else "unlimited"
+    )
+    req = rate.get("requests")
+    interval = rate.get("interval")
+    if req is not None and interval:
+        rate_str = f", rate {req} req / {interval}"
+    else:
+        rate_str = ""
+    return f"{spent_str} used / limit: {limit_str}{rate_str}"

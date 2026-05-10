@@ -44,6 +44,67 @@ def test_count_words_is_per_chat(conn: sqlite3.Connection) -> None:
     assert vocab.count_words(conn, 999) == 0
 
 
+def test_count_labels_returns_zero_for_unknown_chat(
+    conn: sqlite3.Connection,
+) -> None:  # AC1 — chat row absent → 0, must not raise
+    pre = conn.execute(
+        "SELECT 1 FROM chats WHERE chat_id = ?", (CHAT,)
+    ).fetchone()
+    assert pre is None, "precondition: chat row must NOT exist"
+    assert vocab.count_labels(conn, CHAT) == 0, (
+        "count_labels on a chat with no row at all must return 0, not raise"
+    )
+
+
+def test_count_labels_returns_zero_when_no_labels(
+    conn: sqlite3.Connection,
+) -> None:  # AC1 — chat row present but no labels rows → 0
+    vocab.ensure_chat(conn, CHAT)
+    assert vocab.count_labels(conn, CHAT) == 0, (
+        f"chat with no labels rows must report 0; got {vocab.count_labels(conn, CHAT)}"
+    )
+
+
+def test_count_labels_counts_detached_labels(
+    conn: sqlite3.Connection,
+) -> None:  # AC2 — labels with 0 word_labels attachments still count
+    vocab.ensure_chat(conn, CHAT)
+    vocab.get_or_create_label(conn, CHAT, "pos:noun")
+    vocab.get_or_create_label(conn, CHAT, "type:medicine")
+    vocab.get_or_create_label(conn, CHAT, "lonely")
+    attached_rows = conn.execute(
+        "SELECT COUNT(*) AS n FROM word_labels"
+    ).fetchone()["n"]
+    assert attached_rows == 0, (
+        "precondition: no word_labels attachments should exist yet"
+    )
+    assert vocab.count_labels(conn, CHAT) == 3, (
+        f"AC2 — three detached labels must count as 3; got {vocab.count_labels(conn, CHAT)}"
+    )
+
+
+def test_count_labels_is_per_chat(
+    conn: sqlite3.Connection,
+) -> None:  # AC3 — scoped to chat_id, never cross-chat
+    vocab.ensure_chat(conn, CHAT)
+    vocab.ensure_chat(conn, CHAT + 1)
+    vocab.get_or_create_label(conn, CHAT, "alpha")
+    vocab.get_or_create_label(conn, CHAT, "beta")
+    vocab.get_or_create_label(conn, CHAT + 1, "gamma")
+    vocab.get_or_create_label(conn, CHAT + 1, "delta")
+    vocab.get_or_create_label(conn, CHAT + 1, "epsilon")
+
+    assert vocab.count_labels(conn, CHAT) == 2, (
+        f"chat {CHAT} has 2 labels; got {vocab.count_labels(conn, CHAT)}"
+    )
+    assert vocab.count_labels(conn, CHAT + 1) == 3, (
+        f"chat {CHAT + 1} has 3 labels; got {vocab.count_labels(conn, CHAT + 1)}"
+    )
+    assert vocab.count_labels(conn, 9999) == 0, (
+        "unknown chat must report 0 labels"
+    )
+
+
 def test_add_word_returns_true_for_new(conn: sqlite3.Connection) -> None:
     assert vocab.add_word(conn, CHAT, "ephemeral") is True
     assert _all_words(conn) == ["ephemeral"]

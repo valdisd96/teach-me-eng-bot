@@ -336,6 +336,19 @@ def count_words(conn: sqlite3.Connection, chat_id: int) -> int:
     return row[0] if row else 0
 
 
+def count_labels(conn: sqlite3.Connection, chat_id: int) -> int:
+    """Return how many distinct labels exist for `chat_id`.
+
+    Counts rows in the `labels` table, irrespective of `word_labels`
+    attachments — a label with zero attached words still counts.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM labels WHERE chat_id = ?",
+        (chat_id,),
+    ).fetchone()
+    return row[0] if row else 0
+
+
 def scan_mentions(text: str, words: list[tuple[int, str]]) -> list[int]:
     """Return ids of vocab words that appear as literal substrings in `text`.
 
