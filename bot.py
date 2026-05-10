@@ -119,7 +119,7 @@ histories: dict[int, list[dict]] = {}
 conv_paths: dict[int, Path] = {}
 # Chats currently walking the /start config steps.
 sessions: dict[int, config_flow.ConfigSession] = {}
-# Tokens → (chat_id, word) for pending /translate "Add to vocab" buttons.
+# Tokens → (chat_id, word) for pending /tr "Add to vocab" buttons.
 pending_vocab: translator.PendingVocab = translator.PendingVocab()
 # Chats that recently issued /import: chat_id → expiry monotonic timestamp.
 # The next document upload from these chats is parsed as a vocab CSV.
@@ -293,7 +293,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("import", "Bulk-import vocab from a CSV file (one word per row)"),
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
-    ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
+    ("tr", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
     ("games", "Pick a game: Word -> Translation, Translation -> Word (vocab quiz, 1-10 rounds; optional label filter, AND across tokens), or Irregular verbs (past simple + past participle, 1-10 rounds). Use /games cancel to end an in-flight game so a new one can start."),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
@@ -307,7 +307,7 @@ HELP_TEXT = (
     "🤖 *Gemma vocab agent*\n\n"
     "*Getting started*\n"
     "1. Run /start and answer five questions: timezone, pushes per day (6–12), "
-    "active window (HH:MM–HH:MM), tone, target language for /translate.\n"
+    "active window (HH:MM–HH:MM), tone, target language for /tr.\n"
     "2. Add words with /add <word or phrase> — or bulk-load a CSV with "
     "/import (and grab a backup any time with /export). The bot sends short "
     "snippets using those words at random times inside your window.\n"
@@ -624,7 +624,7 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not source_text:
         await update.message.reply_text(
-            "Usage: /translate <text>, or reply to a message with /translate.",
+            "Usage: /tr <text>, or reply to a message with /tr.",
             do_quote=True,
         )
         return
@@ -1397,7 +1397,7 @@ def main() -> None:
     app.add_handler(CommandHandler("import", cmd_import))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("resetvocab", cmd_resetvocab))
-    app.add_handler(CommandHandler("translate", cmd_translate))
+    app.add_handler(CommandHandler("tr", cmd_translate))
     app.add_handler(CommandHandler("games", cmd_games))
     app.add_handler(CommandHandler("label", cmd_label))
     app.add_handler(CommandHandler("unlabel", cmd_unlabel))

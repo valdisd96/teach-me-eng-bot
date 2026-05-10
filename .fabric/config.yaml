@@ -25,7 +25,7 @@ modules:
   - path: llm.py
     role: "Anthropic SSE wrapper + prompt assembly"
   - path: translator.py
-    role: "EN/RU translation for /translate"
+    role: "EN/RU translation for /tr"
   - path: db.py
     role: "SQLite schema + migrations"
   - path: config_flow.py

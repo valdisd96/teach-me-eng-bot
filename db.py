@@ -102,7 +102,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     if "step" not in _column_names(conn, "words"):
         conn.execute("ALTER TABLE words ADD COLUMN step INTEGER")
     if "translate_target" not in _column_names(conn, "chats"):
-        # Existing chats get 'ru' so /translate works before they re-run /start.
+        # Existing chats get 'ru' so /tr works before they re-run /start.
         conn.execute(
             "ALTER TABLE chats ADD COLUMN translate_target TEXT NOT NULL DEFAULT 'ru'"
         )
