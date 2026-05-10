@@ -262,6 +262,107 @@ def test_highlight_matches_handles_multiple_markdown_chunks() -> None:
     assert out == "alpha then <code>beta</code> end"
 
 
+def test_mark_target_word_case_insensitive_simple_match() -> None:  # AC1 — case-insensitive substring match wrapped in <b>, original casing preserved inside
+    out = vocab.mark_target_word("It was a cat day", "cat")
+    assert out == "It was a <b>cat</b> day", (
+        f"AC1 — expected single <b>cat</b> wrap, got: {out!r}"
+    )
+
+
+def test_mark_target_word_wraps_every_occurrence_preserving_case() -> None:  # AC2 — every case-insensitive occurrence wrapped, casing preserved
+    out = vocab.mark_target_word("Cats and CATS love cat naps", "cat")
+    assert out == "<b>Cat</b>s and <b>CAT</b>S love <b>cat</b> naps", (
+        f"AC2 — every match must be wrapped with original casing; got: {out!r}"
+    )
+
+
+def test_mark_target_word_no_match_returns_escaped_no_bold() -> None:  # AC3 — target not present → HTML-escaped text, no <b> tags
+    out = vocab.mark_target_word("horse runs fast", "cat")
+    assert out == "horse runs fast", (
+        f"AC3 — no match must produce no <b> tags; got: {out!r}"
+    )
+    assert "<b>" not in out, "AC3 — output must contain no <b> tag at all"
+
+
+def test_mark_target_word_only_target_other_vocab_unmarked() -> None:  # AC4 — only the explicit target is wrapped; incidental words stay plain (S1)
+    out = vocab.mark_target_word("cat and dog play", "cat")
+    assert out == "<b>cat</b> and dog play", (
+        f"AC4/S1 — only 'cat' must be wrapped, 'dog' must stay plain; got: {out!r}"
+    )
+    assert "<b>dog</b>" not in out, (
+        "AC4/S1 — the function must not bold any word other than the target"
+    )
+
+
+def test_mark_target_word_empty_text() -> None:  # AC5 — empty text short-circuits to ""
+    assert vocab.mark_target_word("", "cat") == "", (
+        "AC5 — empty text must short-circuit to empty string"
+    )
+
+
+def test_mark_target_word_escapes_html_outside_match() -> None:  # AC6 — non-match regions escaped; <b> tags themselves are not escaped
+    out = vocab.mark_target_word("<cat> & dog", "cat")
+    assert out == "&lt;<b>cat</b>&gt; &amp; dog", (
+        f"AC6 — non-match regions must be HTML-escaped while <b> tags stay literal; got: {out!r}"
+    )
+
+
+def test_mark_target_word_strips_markdown_bold_around_target() -> None:  # AC7 — `**target**` markers stripped before marking, no literal stars in output
+    out = vocab.mark_target_word("the **cat** sat", "cat")
+    assert out == "the <b>cat</b> sat", (
+        f"AC7 — markdown bold markers must be stripped, no '**' in output; got: {out!r}"
+    )
+    assert "*" not in out, "AC7 — no literal asterisk should leak into the output"
+
+
+def test_mark_target_word_empty_target_returns_escaped_plain() -> None:  # AC8 — empty target → HTML-escaped text, no bolding
+    assert vocab.mark_target_word("hello", "") == "hello", (
+        "AC8 — empty target must return the (escaped) text with no bolding"
+    )
+
+
+def test_format_push_body_header_blank_line_marked_snippet() -> None:  # AC9 — header line, blank line, then marked snippet
+    out = vocab.format_push_body("cat", "the cat sat")
+    assert out == "\U0001F4CC <b>cat</b>\n\nthe <b>cat</b> sat", (
+        f"AC9 — header `📌 <b>cat</b>` then blank line then marked body; got: {out!r}"
+    )
+
+
+def test_format_push_body_html_escapes_target_and_body() -> None:  # AC10 — HTML special chars in target/body are both escaped, but <b> tags stay literal
+    out = vocab.format_push_body("<x>", "a <x> b")
+    assert out == "\U0001F4CC <b>&lt;x&gt;</b>\n\na <b>&lt;x&gt;</b> b", (
+        f"AC10 — header target and body match must both be HTML-safe; got: {out!r}"
+    )
+
+
+def test_format_push_body_empty_target_no_header() -> None:  # AC11 — defensive: empty target ⇒ no header, body returned as-is from mark_target_word
+    out = vocab.format_push_body("", "text")
+    assert out == "text", (
+        f"AC11 — empty target must omit the header entirely; got: {out!r}"
+    )
+    assert "\U0001F4CC" not in out, "AC11 — no 📌 prefix when target is empty"
+
+
+def test_push_header_prefix_constant() -> None:  # AC12 — module-level constant exposes the 📌 emoji
+    assert vocab.PUSH_HEADER_PREFIX == "\U0001F4CC", (
+        f"AC12 — PUSH_HEADER_PREFIX must equal '📌'; got: {vocab.PUSH_HEADER_PREFIX!r}"
+    )
+
+
+def test_mark_target_word_substring_inside_word() -> None:  # edge: substring match (no overlap-longest-wins logic — only one target in play)
+    out = vocab.mark_target_word("Concatenate", "cat")
+    assert out == "Con<b>cat</b>enate", (
+        f"edge — substring inside a longer word must still be wrapped; got: {out!r}"
+    )
+
+
+def test_mark_target_word_phrase_target_with_spaces() -> None:  # edge: target is a multi-word phrase ("on the fly") — substring match still works
+    out = vocab.mark_target_word("She did it on the fly today.", "on the fly")
+    assert out == "She did it <b>on the fly</b> today.", (
+        f"edge — phrase target must wrap as a single span; got: {out!r}"
+    )
+
+
 def test_bump_mentions_increments_and_timestamps(conn: sqlite3.Connection) -> None:
     vocab.add_word(conn, CHAT, "placid")
     wid = conn.execute("SELECT id FROM words").fetchone()["id"]
