@@ -1398,7 +1398,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply = f"✅ {rd.expected}"
         else:
             reply = f"❌ correct: {rd.expected}"
-        repeat_module.apply_answer(rep_game, correct, source_word=rd.source_word)
+        source_word = rd.prompt if rd.direction == "en2ru" else rd.expected
+        repeat_module.apply_answer(rep_game, correct, source_word=source_word)
         try:
             vocab.record_outcome(
                 conn, rd.word_id, correct=correct, weight=0.5, source="game"

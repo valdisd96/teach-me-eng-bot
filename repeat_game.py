@@ -23,7 +23,6 @@ class Round:
     prompt: str
     expected: str
     direction: Direction
-    source_word: str
 
 
 @dataclass
@@ -100,7 +99,6 @@ def draw_rounds(
                 prompt=prompt,
                 expected=expected,
                 direction=direction,
-                source_word=text,
             )
         )
     return out
