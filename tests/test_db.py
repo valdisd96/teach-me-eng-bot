@@ -302,3 +302,86 @@ def test_delete_chat_cascades_to_labels_and_word_labels(conn: sqlite3.Connection
     assert conn.execute("SELECT COUNT(*) AS n FROM word_labels").fetchone()["n"] == 0, (
         "word_labels must cascade transitively (via words and labels)"
     )
+
+
+# --- words.remembered_streak column (issue #125) ----------------------------
+
+
+def test_words_remembered_streak_default_is_zero(conn: sqlite3.Connection) -> None:  # AC7 — fresh insert leaves remembered_streak == 0.0
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-04-21')"
+    )
+    conn.execute(
+        "INSERT INTO words(chat_id, text, added_at) VALUES (1, 'fresh', '2026-04-21')"
+    )
+    row = conn.execute("SELECT remembered_streak FROM words").fetchone()
+    assert row["remembered_streak"] == 0.0, (
+        f"newly-inserted word must default to remembered_streak=0.0; got {row['remembered_streak']!r}"
+    )
+
+    cols = _word_columns(conn)
+    assert "remembered_streak" in cols, (
+        f"expected remembered_streak column, got {sorted(cols)}"
+    )
+    assert cols["remembered_streak"]["type"].upper() == "REAL", (
+        f"remembered_streak must be REAL; got {cols['remembered_streak']['type']!r}"
+    )
+    assert cols["remembered_streak"]["notnull"] == 1, (
+        "remembered_streak must be NOT NULL"
+    )
+
+
+def test_init_db_adds_remembered_streak_to_legacy_db(tmp_path: Path) -> None:  # AC8 — pre-existing on-disk db gets the column with value 0.0 on existing rows
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path, isolation_level=None)
+    legacy.row_factory = sqlite3.Row
+    # Hand-build a `words` row that predates the remembered_streak column.
+    # Mirrors the shape of the schema *before* issue #125's column was added.
+    legacy.execute(
+        """
+        CREATE TABLE chats (
+            chat_id INTEGER PRIMARY KEY,
+            tz TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    legacy.execute(
+        """
+        CREATE TABLE words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            added_at TEXT NOT NULL,
+            UNIQUE(chat_id, text),
+            FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+        )
+        """
+    )
+    legacy.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-04-21')"
+    )
+    legacy.execute(
+        "INSERT INTO words(chat_id, text, added_at) VALUES (1, 'legacy', '2026-04-21')"
+    )
+    legacy.close()
+
+    # Re-open via the production connect+init path; the migration must add the
+    # column without raising and pre-existing rows must materialise as 0.0.
+    c = db_mod.connect(path)
+    db_mod.init_db(c)
+    cols = _word_columns(c)
+    assert "remembered_streak" in cols, (
+        f"migration must add remembered_streak column to legacy db; got {sorted(cols)}"
+    )
+    row = c.execute(
+        "SELECT remembered_streak FROM words WHERE text = 'legacy'"
+    ).fetchone()
+    assert row is not None, "pre-existing row must survive the migration"
+    assert row["remembered_streak"] == 0.0, (
+        f"pre-existing rows must initialise to 0.0; got {row['remembered_streak']!r}"
+    )
+
+    # Re-running init_db must remain idempotent on a now-migrated db.
+    db_mod.init_db(c)
+    c.close()
