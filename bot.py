@@ -991,6 +991,9 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     rating = Rating.Good if verdict == "good" else Rating.Again
     try:
         vocab.rate_word(conn, word_id, rating)
+        vocab.record_outcome(
+            conn, word_id, correct=(rating == Rating.Good), weight=1.0, source="push"
+        )
     except KeyError:
         log.warning("rate_word: unknown word_id %s", word_id)
     sched_module.mark_rated(conn, push_id)
@@ -1231,6 +1234,13 @@ async def on_game_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         feedback_rows.append([InlineKeyboardButton(label, callback_data="noop")])
 
     games_module.apply_answer(game, chosen_idx)
+    assert conn is not None
+    try:
+        vocab.record_outcome(
+            conn, rd.word_id, correct=correct, weight=0.5, source="game"
+        )
+    except KeyError:
+        log.warning("record_outcome: unknown word_id %s", rd.word_id)
 
     try:
         await query.edit_message_reply_markup(InlineKeyboardMarkup(feedback_rows))

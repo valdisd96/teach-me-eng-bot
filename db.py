@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS words (
     lapses         INTEGER NOT NULL DEFAULT 0,
     last_review    TEXT,
     translation    TEXT,
+    remembered_streak REAL NOT NULL DEFAULT 0,
     UNIQUE(chat_id, text),
     FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
 );
@@ -112,3 +113,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     if "focus_spec" not in _column_names(conn, "chats"):
         # NULL means "no focus" — set via /focus, cleared via /focus clear.
         conn.execute("ALTER TABLE chats ADD COLUMN focus_spec TEXT")
+    if "remembered_streak" not in _column_names(conn, "words"):
+        conn.execute(
+            "ALTER TABLE words ADD COLUMN remembered_streak REAL NOT NULL DEFAULT 0"
+        )

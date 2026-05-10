@@ -523,6 +523,34 @@ def rate_word(
     )
 
 
+def record_outcome(
+    conn: sqlite3.Connection,
+    word_id: int,
+    correct: bool,
+    weight: float,
+    source: str,
+) -> None:
+    """Canonical chokepoint for word-outcome events.
+
+    On `correct=True` adds `weight` to `words.remembered_streak`; on
+    `correct=False` resets the streak to 0 regardless of `weight`. `source`
+    identifies the originating surface (`"push"`, `"game"`, …) and exists
+    so later children can dispatch label-flips / score effects off one seam.
+    """
+    if correct:
+        cur = conn.execute(
+            "UPDATE words SET remembered_streak = remembered_streak + ? WHERE id = ?",
+            (weight, word_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE words SET remembered_streak = 0 WHERE id = ?",
+            (word_id,),
+        )
+    if cur.rowcount == 0:
+        raise KeyError(word_id)
+
+
 def _forget_prob(row: sqlite3.Row, now: datetime.datetime) -> float:
     """1 - FSRS retrievability. Unrated words → 1.0 (maximal urgency)."""
     if row["stability"] is None:
