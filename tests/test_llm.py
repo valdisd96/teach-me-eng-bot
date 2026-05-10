@@ -343,3 +343,217 @@ def test_health_llama_unreachable_returns_error_string(
     monkeypatch.setattr(httpx, "AsyncClient", factory)
     out = asyncio.run(llm.health())
     assert "unreachable" in out
+
+
+# usage() ---------------------------------------------------------------
+
+
+def _patch_usage_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response | Exception,
+) -> dict:
+    """Capture one outbound request and reply with `response` (or raise it)."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    transport = httpx.MockTransport(handler)
+    real = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    return captured
+
+
+def _block_all_http(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Replace httpx.AsyncClient with a transport that fails on any call.
+
+    Used to prove usage() makes no network call when not on openrouter.
+    """
+    calls: dict = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise AssertionError(
+            f"usage() must not call out to {request.url!r} on this backend"
+        )
+
+    transport = httpx.MockTransport(handler)
+    real = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    return calls
+
+
+def test_usage_returns_na_for_default_backend(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC4 — default (llama) backend → "n/a"
+    _block_all_http(monkeypatch)
+    out = asyncio.run(llm.usage())
+    assert out == "n/a", (
+        f"AC4 — default backend usage() must return literal 'n/a'; got {out!r}"
+    )
+
+
+def test_usage_returns_na_for_unknown_backend(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC4 — anything other than openrouter → "n/a"
+    clean_env.setenv("LLM_BACKEND", "claude")
+    _block_all_http(monkeypatch)
+    out = asyncio.run(llm.usage())
+    assert out == "n/a", (
+        f"AC4 — non-openrouter backend usage() must return 'n/a'; got {out!r}"
+    )
+
+
+def test_usage_makes_no_http_call_when_not_openrouter(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC4 — backend != openrouter → zero HTTP requests
+    calls = _block_all_http(monkeypatch)
+    asyncio.run(llm.usage())
+    assert calls["count"] == 0, (
+        f"AC4 — usage() must make zero HTTP calls when backend is not openrouter; "
+        f"made {calls['count']}"
+    )
+
+
+def test_usage_openrouter_hits_auth_key_with_bearer(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC5 — GET https://openrouter.ai/api/v1/auth/key with Bearer header
+    clean_env.setenv("LLM_BACKEND", "openrouter")
+    clean_env.setenv("OPENROUTER_API_KEY", "sk-test")
+    response = httpx.Response(
+        200,
+        json={
+            "data": {
+                "usage": 0.012,
+                "limit": 5.0,
+                "rate_limit": {"requests": 200, "interval": "10s"},
+            }
+        },
+    )
+    captured = _patch_usage_response(monkeypatch, response)
+    asyncio.run(llm.usage())
+
+    assert captured["method"] == "GET", (
+        f"AC5 — usage() must use GET; got {captured['method']!r}"
+    )
+    assert captured["url"] == "https://openrouter.ai/api/v1/auth/key", (
+        f"AC5 — usage() must hit /api/v1/auth/key; got {captured['url']!r}"
+    )
+    assert captured["headers"].get("authorization") == "Bearer sk-test", (
+        f"AC5 — usage() must carry Bearer header; got "
+        f"{captured['headers'].get('authorization')!r}"
+    )
+
+
+def test_usage_openrouter_summary_contains_all_fields(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC5 — single-line summary surfaces usage, limit, rate
+    clean_env.setenv("LLM_BACKEND", "openrouter")
+    clean_env.setenv("OPENROUTER_API_KEY", "sk-test")
+    response = httpx.Response(
+        200,
+        json={
+            "data": {
+                "usage": 0.012,
+                "limit": 5.0,
+                "rate_limit": {"requests": 200, "interval": "10s"},
+            }
+        },
+    )
+    _patch_usage_response(monkeypatch, response)
+    out = asyncio.run(llm.usage())
+
+    assert "\n" not in out, (
+        f"AC5 — usage() must return a single line; got multi-line {out!r}"
+    )
+    # Per AC5 the *fields* are pinned, not exact punctuation: usage dollars,
+    # limit dollars, and rate (requests + interval) must each be present.
+    assert "0.012" in out, f"AC5 — usage dollars must appear; got {out!r}"
+    assert "5" in out, f"AC5 — limit dollars must appear; got {out!r}"
+    assert "200" in out, f"AC5 — rate requests must appear; got {out!r}"
+    assert "10s" in out, f"AC5 — rate interval must appear; got {out!r}"
+
+
+def test_usage_openrouter_renders_null_limit_as_unlimited(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # edge — limit: null → "unlimited"
+    clean_env.setenv("LLM_BACKEND", "openrouter")
+    clean_env.setenv("OPENROUTER_API_KEY", "sk-test")
+    response = httpx.Response(
+        200,
+        json={
+            "data": {
+                "usage": 0.012,
+                "limit": None,
+                "rate_limit": {"requests": 200, "interval": "10s"},
+            }
+        },
+    )
+    _patch_usage_response(monkeypatch, response)
+    out = asyncio.run(llm.usage())
+
+    assert "unlimited" in out, (
+        f"edge — null limit must render as literal 'unlimited'; got {out!r}"
+    )
+
+
+def test_usage_openrouter_returns_unavailable_on_non_2xx(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC6 — non-2xx → "unavailable (...)"
+    clean_env.setenv("LLM_BACKEND", "openrouter")
+    clean_env.setenv("OPENROUTER_API_KEY", "sk-test")
+    response = httpx.Response(503, text="upstream sad")
+    _patch_usage_response(monkeypatch, response)
+    out = asyncio.run(llm.usage())
+
+    assert out.startswith("unavailable"), (
+        f"AC6 — non-2xx must yield a string starting with 'unavailable'; got {out!r}"
+    )
+
+
+def test_usage_openrouter_returns_unavailable_on_error(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC6 — transport error → "unavailable (...)", does not raise
+    clean_env.setenv("LLM_BACKEND", "openrouter")
+    clean_env.setenv("OPENROUTER_API_KEY", "sk-test")
+    _patch_usage_response(monkeypatch, httpx.ConnectError("simulated"))
+
+    out = asyncio.run(llm.usage())
+    assert out.startswith("unavailable"), (
+        f"AC6 — transport error must surface as 'unavailable (...)' not raise; "
+        f"got {out!r}"
+    )
+
+
+def test_usage_openrouter_without_key_raises_runtimeerror(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # error — empty OPENROUTER_API_KEY propagates RuntimeError
+    clean_env.setenv("LLM_BACKEND", "openrouter")
+    # OPENROUTER_API_KEY left unset by clean_env fixture.
+    _block_all_http(monkeypatch)
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        asyncio.run(llm.usage())
