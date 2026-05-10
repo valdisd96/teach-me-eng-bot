@@ -717,6 +717,13 @@ async def cmd_label(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except ValueError as e:
         await update.message.reply_text(f"⚠️ {e}")
         return
+    reserved = sorted(set(names) & vocab.RESERVED_LABEL_NAMES)
+    if reserved:
+        await update.message.reply_text(
+            f"⚠️ {', '.join(reserved)} is a system label — managed automatically, "
+            "can't be set by hand"
+        )
+        return
     word_id = vocab.find_word_id(conn, chat_id, word_arg)
     normalized_word = word_arg.strip().lower()
     if word_id is None:
@@ -768,6 +775,13 @@ async def cmd_unlabel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         names = vocab.parse_label_spec(spec_args)
     except ValueError as e:
         await update.message.reply_text(f"⚠️ {e}")
+        return
+    reserved = sorted(set(names) & vocab.RESERVED_LABEL_NAMES)
+    if reserved:
+        await update.message.reply_text(
+            f"⚠️ {', '.join(reserved)} is a system label — managed automatically, "
+            "can't be removed by hand"
+        )
         return
     word_id = vocab.find_word_id(conn, chat_id, word_arg)
     normalized_word = word_arg.strip().lower()
@@ -893,7 +907,8 @@ def _playable_rows(
         if names
         else vocab.list_words(conn_, chat_id)
     )
-    return [r for r in rows if r["translation"]]
+    excluded = vocab.remembered_word_ids(conn_, chat_id)
+    return [r for r in rows if r["translation"] and r["id"] not in excluded]
 
 
 def _round_keyboard(game: games_module.Game) -> InlineKeyboardMarkup:

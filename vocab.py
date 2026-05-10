@@ -536,6 +536,11 @@ def record_outcome(
     `correct=False` resets the streak to 0 regardless of `weight`. `source`
     identifies the originating surface (`"push"`, `"game"`, …) and exists
     so later children can dispatch label-flips / score effects off one seam.
+
+    When a `correct=True` update lifts `remembered_streak` to
+    `REMEMBERED_THRESHOLD` or above, the word is auto-attached to the
+    `remembered` system label; subsequent crossings are no-ops thanks to
+    `attach_label`'s INSERT OR IGNORE.
     """
     if correct:
         cur = conn.execute(
@@ -549,6 +554,16 @@ def record_outcome(
         )
     if cur.rowcount == 0:
         raise KeyError(word_id)
+    if correct:
+        row = conn.execute(
+            "SELECT chat_id, remembered_streak FROM words WHERE id = ?",
+            (word_id,),
+        ).fetchone()
+        if row["remembered_streak"] >= REMEMBERED_THRESHOLD:
+            label_id = get_or_create_label(
+                conn, row["chat_id"], REMEMBERED_LABEL
+            )
+            attach_label(conn, word_id, label_id)
 
 
 def _forget_prob(row: sqlite3.Row, now: datetime.datetime) -> float:
@@ -602,7 +617,9 @@ def select_word(
     When `names` is non-empty, the candidate pool is restricted via
     `words_matching_labels` — `mode="all"` (default) requires every label,
     `mode="any"` requires at least one. Empty `names` (or None) preserves the
-    unfiltered pool regardless of `mode`.
+    unfiltered pool regardless of `mode`. Words carrying the `remembered`
+    system label are always excluded, regardless of `names`/`mode` — they
+    have auto-graduated and stop appearing in pushes.
     """
     now = now or _now_dt()
     if names:
@@ -611,6 +628,9 @@ def select_word(
         rows = conn.execute(
             "SELECT * FROM words WHERE chat_id = ?", (chat_id,)
         ).fetchall()
+    excluded = remembered_word_ids(conn, chat_id)
+    if excluded:
+        rows = [r for r in rows if r["id"] not in excluded]
     if not rows:
         return None
     weights = [compute_weight(r, now) for r in rows]
@@ -621,6 +641,10 @@ def select_word(
 # --- labels (per-chat many-to-many tags on words) ---------------------------
 
 POS_PREFIX = "pos:"
+
+REMEMBERED_LABEL = "remembered"
+REMEMBERED_THRESHOLD = 3.0
+RESERVED_LABEL_NAMES: frozenset[str] = frozenset({REMEMBERED_LABEL})
 
 
 def parse_label_spec(args: list[str]) -> list[str]:
@@ -737,6 +761,25 @@ def detach_label(conn: sqlite3.Connection, word_id: int, label_id: int) -> bool:
         (word_id, label_id),
     )
     return cur.rowcount > 0
+
+
+def remembered_word_ids(
+    conn: sqlite3.Connection, chat_id: int
+) -> set[int]:
+    """`words.id` values in `chat_id` carrying the `remembered` system label.
+
+    Used by `select_word` and the games-pool builder to keep auto-graduated
+    words out of pushes and multi-choice rounds in one query rather than
+    N per-row lookups.
+    """
+    rows = conn.execute(
+        "SELECT wl.word_id AS word_id "
+        "FROM word_labels wl "
+        "JOIN labels l ON l.id = wl.label_id "
+        "WHERE l.chat_id = ? AND l.name = ?",
+        (chat_id, REMEMBERED_LABEL),
+    ).fetchall()
+    return {r["word_id"] for r in rows}
 
 
 def labels_for_word(conn: sqlite3.Connection, word_id: int) -> list[str]:
