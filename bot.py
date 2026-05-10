@@ -510,7 +510,9 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         header = f"Vocab ({len(rows)}):"
 
     label_map = vocab.labels_for_words_in_chat(conn, chat_id)
-    scores = vocab.compute_scores(rows)
+    scores = vocab.compute_scores(
+        rows, hard_word_ids=vocab.hard_focus_word_ids(conn, chat_id)
+    )
     lines = [
         f"• {r['text']} (seen {r['mention_count']}×, score {s})"
         + (
@@ -1401,8 +1403,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         source_word = rd.prompt if rd.direction == "en2ru" else rd.expected
         repeat_module.apply_answer(rep_game, correct, source_word=source_word)
         try:
+            # source="repeat" gates the forget-flip in record_outcome — a wrong
+            # answer here drops `remembered` and attaches `focus:hard`.
             vocab.record_outcome(
-                conn, rd.word_id, correct=correct, weight=0.5, source="game"
+                conn, rd.word_id, correct=correct, weight=0.5, source="repeat"
             )
         except KeyError:
             log.warning("record_outcome: unknown word_id %s", rd.word_id)

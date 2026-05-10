@@ -534,13 +534,20 @@ def record_outcome(
 
     On `correct=True` adds `weight` to `words.remembered_streak`; on
     `correct=False` resets the streak to 0 regardless of `weight`. `source`
-    identifies the originating surface (`"push"`, `"game"`, …) and exists
-    so later children can dispatch label-flips / score effects off one seam.
+    identifies the originating surface (`"push"`, `"game"`, `"repeat"`, …)
+    and lets us dispatch label-flips / score effects off one seam.
 
     When a `correct=True` update lifts `remembered_streak` to
     `REMEMBERED_THRESHOLD` or above, the word is auto-attached to the
-    `remembered` system label; subsequent crossings are no-ops thanks to
-    `attach_label`'s INSERT OR IGNORE.
+    `remembered` system label and any pre-existing `focus:hard` row is
+    stripped (re-graduation cancels the boost). Subsequent crossings are
+    no-ops thanks to `attach_label`'s INSERT OR IGNORE.
+
+    When `source="repeat"` and `correct=False`, the word is "forget-flipped":
+    `remembered` is detached and `focus:hard` attached so it re-enters the
+    push/game pool with a 2× selection weight. This branch is gated to
+    `source="repeat"` so multi-choice game misses (which run over
+    non-remembered words) do not accidentally graduate words to `focus:hard`.
     """
     if correct:
         cur = conn.execute(
@@ -554,16 +561,26 @@ def record_outcome(
         )
     if cur.rowcount == 0:
         raise KeyError(word_id)
+    chat_id = conn.execute(
+        "SELECT chat_id FROM words WHERE id = ?", (word_id,)
+    ).fetchone()["chat_id"]
     if correct:
-        row = conn.execute(
-            "SELECT chat_id, remembered_streak FROM words WHERE id = ?",
-            (word_id,),
-        ).fetchone()
-        if row["remembered_streak"] >= REMEMBERED_THRESHOLD:
-            label_id = get_or_create_label(
-                conn, row["chat_id"], REMEMBERED_LABEL
-            )
+        streak = conn.execute(
+            "SELECT remembered_streak FROM words WHERE id = ?", (word_id,)
+        ).fetchone()["remembered_streak"]
+        if streak >= REMEMBERED_THRESHOLD:
+            label_id = get_or_create_label(conn, chat_id, REMEMBERED_LABEL)
             attach_label(conn, word_id, label_id)
+            hard_id = find_label_id(conn, chat_id, FOCUS_HARD_LABEL)
+            if hard_id is not None:
+                detach_label(conn, word_id, hard_id)
+    else:
+        if source == "repeat":
+            remembered_id = find_label_id(conn, chat_id, REMEMBERED_LABEL)
+            if remembered_id is not None:
+                detach_label(conn, word_id, remembered_id)
+            hard_id = get_or_create_label(conn, chat_id, FOCUS_HARD_LABEL)
+            attach_label(conn, word_id, hard_id)
 
 
 def _forget_prob(row: sqlite3.Row, now: datetime.datetime) -> float:
@@ -575,28 +592,45 @@ def _forget_prob(row: sqlite3.Row, now: datetime.datetime) -> float:
     )
 
 
-def compute_weight(row: sqlite3.Row, now: datetime.datetime) -> float:
+def compute_weight(
+    row: sqlite3.Row,
+    now: datetime.datetime,
+    *,
+    hard_word_ids: set[int] | None = None,
+) -> float:
     """Selection weight for a word. Each factor lives in [0, 1] and is lifted
-    to [1, 2] so no single signal can dominate the product."""
+    to [1, 2] so no single signal can dominate the product.
+
+    When `hard_word_ids` is provided and `row["id"]` is in it, the final
+    product is multiplied by `HARD_FOCUS_BOOST` (2.0) — `focus:hard` words
+    surface roughly twice as often.
+    """
     forget_prob = _forget_prob(row, now)
     age_days = (now - _parse_ts(row["added_at"])).total_seconds() / 86400.0
     recency_boost = math.exp(-max(age_days, 0.0) / RECENCY_TAU_DAYS)
     rarity_boost = 1.0 / (1.0 + row["mention_count"])
-    return (1 + forget_prob) * (1 + recency_boost) * (1 + rarity_boost)
+    weight = (1 + forget_prob) * (1 + recency_boost) * (1 + rarity_boost)
+    if hard_word_ids and row["id"] in hard_word_ids:
+        weight *= HARD_FOCUS_BOOST
+    return weight
 
 
 def compute_scores(
     rows: list[sqlite3.Row],
     now: datetime.datetime | None = None,
+    *,
+    hard_word_ids: set[int] | None = None,
 ) -> list[int]:
     """Normalize per-row weights to 0..100 integers against the list's max.
 
     Empty input returns []. If all weights tie, every row scores 100.
+    `hard_word_ids` is forwarded to `compute_weight` so `focus:hard` rows
+    receive the same 2× boost they get during selection.
     """
     if not rows:
         return []
     now = now or _now_dt()
-    weights = [compute_weight(r, now) for r in rows]
+    weights = [compute_weight(r, now, hard_word_ids=hard_word_ids) for r in rows]
     top = max(weights)
     if top <= 0:
         return [0] * len(rows)
@@ -633,7 +667,8 @@ def select_word(
         rows = [r for r in rows if r["id"] not in excluded]
     if not rows:
         return None
-    weights = [compute_weight(r, now) for r in rows]
+    hard_ids = hard_focus_word_ids(conn, chat_id)
+    weights = [compute_weight(r, now, hard_word_ids=hard_ids) for r in rows]
     pick = (rng or random).choices(rows, weights=weights, k=1)
     return pick[0]
 
@@ -644,7 +679,11 @@ POS_PREFIX = "pos:"
 
 REMEMBERED_LABEL = "remembered"
 REMEMBERED_THRESHOLD = 3.0
-RESERVED_LABEL_NAMES: frozenset[str] = frozenset({REMEMBERED_LABEL})
+FOCUS_HARD_LABEL = "focus:hard"
+HARD_FOCUS_BOOST = 2.0
+RESERVED_LABEL_NAMES: frozenset[str] = frozenset(
+    {REMEMBERED_LABEL, FOCUS_HARD_LABEL}
+)
 
 
 def parse_label_spec(args: list[str]) -> list[str]:
@@ -778,6 +817,24 @@ def remembered_word_ids(
         "JOIN labels l ON l.id = wl.label_id "
         "WHERE l.chat_id = ? AND l.name = ?",
         (chat_id, REMEMBERED_LABEL),
+    ).fetchall()
+    return {r["word_id"] for r in rows}
+
+
+def hard_focus_word_ids(
+    conn: sqlite3.Connection, chat_id: int
+) -> set[int]:
+    """`words.id` values in `chat_id` carrying the `focus:hard` system label.
+
+    Loaded once per `select_word` / `compute_scores` call and forwarded to
+    `compute_weight` so boosted rows surface ~2× as often.
+    """
+    rows = conn.execute(
+        "SELECT wl.word_id AS word_id "
+        "FROM word_labels wl "
+        "JOIN labels l ON l.id = wl.label_id "
+        "WHERE l.chat_id = ? AND l.name = ?",
+        (chat_id, FOCUS_HARD_LABEL),
     ).fetchall()
     return {r["word_id"] for r in rows}
 
