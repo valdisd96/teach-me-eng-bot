@@ -24,9 +24,9 @@ Exposed primitives:
     vocab list.
   * `format_vocab_note(word_count, added, max_words=5)` — the 1-line status
     (`added to vocab ✅` / `already in vocab` / `not added (N words)`) shown
-    beneath a /translate reply when the 5-word cap is exceeded.
+    beneath a /tr reply when the 5-word cap is exceeded.
   * `PendingVocab` — token↔word registry for the 'Add to vocab' button under
-    a /translate reply, sidestepping Telegram's 64-byte callback_data limit.
+    a /tr reply, sidestepping Telegram's 64-byte callback_data limit.
 
 `_name_to_code()` is cached because `deep_translator`'s language list is a
 static dict (no network), so we only build it once per process.
@@ -171,7 +171,7 @@ def is_target_script(text: str, target: str) -> bool:
 
 
 def format_vocab_note(word_count: int, added: bool, max_words: int = 5) -> str:
-    """One-line status shown under the reply of a /translate vocab add.
+    """One-line status shown under the reply of a /tr vocab add.
 
     Used for both directions: reverse (target→English, adds the translation)
     and forward (English→target, adds the source). The rules are identical:
@@ -186,7 +186,7 @@ def format_vocab_note(word_count: int, added: bool, max_words: int = 5) -> str:
 
 
 def vocab_target(source_text: str, translated: str, reverse: bool) -> str:
-    """Return the English side of a /translate pair — the one that lands in vocab.
+    """Return the English side of a /tr pair — the one that lands in vocab.
 
     Forward flow (English→target) adds the source. Reverse flow (target→English)
     adds the translation. Either way, the learner's English vocab is what grows.
@@ -195,15 +195,15 @@ def vocab_target(source_text: str, translated: str, reverse: bool) -> str:
 
 
 class PendingVocab:
-    """Short-token → (chat_id, word) registry for /translate's 'Add to vocab' button.
+    """Short-token → (chat_id, word) registry for /tr's 'Add to vocab' button.
 
     Telegram caps `callback_data` at 64 bytes, so we can't stuff arbitrary UTF-8
-    vocab phrases in there. Each /translate reply registers its candidate word
+    vocab phrases in there. Each /tr reply registers its candidate word
     and stamps the button with the resulting integer token; tapping the button
     pops the token and yields the word for a DB write.
 
     In-memory only: a bot restart orphans outstanding buttons, which taps
-    surface as 'expired'. Acceptable — the user can just /translate again.
+    surface as 'expired'. Acceptable — the user can just /tr again.
 
     The `max_size` cap evicts the oldest entry whenever the dict grows past it,
     so a long-running process can't leak memory from never-tapped buttons.

@@ -27,7 +27,7 @@ class Settings:
     active_start: str  # "HH:MM"
     active_end: str
     tone: str
-    target_lang: str  # ISO 639-1 code used by /translate
+    target_lang: str  # ISO 639-1 code used by /tr
 
 
 def validate_tz(s: str) -> str:
@@ -100,7 +100,7 @@ _STEPS = [
     ),
     (
         "target_lang",
-        "Translation target language? (e.g. 'russian' or 'ru' — used by /translate)",
+        "Translation target language? (e.g. 'russian' or 'ru' — used by /tr)",
         validate_target_lang,
     ),
 ]

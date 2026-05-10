@@ -30,7 +30,7 @@ EXPECTED_NON_GAMES_ENTRIES: list[tuple[str, str]] = [
     ("import", "Bulk-import vocab from a CSV file (one word per row)"),
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
-    ("translate", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
+    ("tr", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -42,7 +42,7 @@ EXPECTED_NON_GAMES_ENTRIES: list[tuple[str, str]] = [
 
 EXPECTED_NAMES_IN_ORDER: list[str] = [
     "start", "help", "add", "remove", "list", "import", "export",
-    "resetvocab", "translate", "games", "label", "unlabel", "labels",
+    "resetvocab", "tr", "games", "label", "unlabel", "labels",
     "focus", "clear", "status",
 ]
 
