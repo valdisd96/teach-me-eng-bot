@@ -3,18 +3,14 @@
 # Generated from agent-fabric's template at examples/github-actions/deploy.yml.
 # See `docs/deploy.md` for the deploy contract this workflow implements, and
 # DESIGN.md "Decision 15 — Deployment of managed projects" in the agent-fabric
-# repo for the rationale (no auto-rollback; failures self-heal via the
-# deploy-diagnose skill that fabric auto-dispatches).
+# repo for the rationale (no auto-rollback — broken version stays running
+# until the next fix-PR redeploys and supersedes it).
 #
 # Required host setup (one-time, see deploy-setup.md in agent-fabric):
 #   - A repo-scoped self-hosted runner registered to valdisd96/teach-me-eng-bot
 #     with labels `self-hosted, deploy-target` (and ideally `teach-me-eng-bot`).
 #   - `/var/lib/teach-me-eng-bot/` owned by the runner user.
-#   - `github-runner` has passwordless sudo (already true on the fabric VM).
-#
-# Optional repo secrets (workflow degrades cleanly when unset):
-#   - FABRIC_DEPLOY_URL: e.g. http://127.0.0.1:7878 — base URL of the fabric.
-#   - FABRIC_TOKEN: bearer token sent to fabric's deploy endpoints.
+#   - `github-runner` has passwordless sudo (already true on the host VM).
 
 name: deploy
 
@@ -122,45 +118,3 @@ jobs:
           }
           EOF
           echo "wrote /var/lib/$PROJECT_NAME/deploy.json"
-
-      - name: notify fabric (success)
-        if: success()
-        env:
-          FABRIC_DEPLOY_URL: ${{ secrets.FABRIC_DEPLOY_URL }}
-          FABRIC_TOKEN: ${{ secrets.FABRIC_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${FABRIC_DEPLOY_URL:-}" ]; then
-            echo "FABRIC_DEPLOY_URL not set — skipping fabric notification (bootstrap mode)"
-            exit 0
-          fi
-          curl --silent --fail --max-time 10 \
-            -H "Authorization: Bearer $FABRIC_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d @"/var/lib/$PROJECT_NAME/deploy.json" \
-            "$FABRIC_DEPLOY_URL/api/projects/$PROJECT_NAME/deployments"
-
-      - name: notify fabric (failure)
-        if: failure()
-        env:
-          FABRIC_DEPLOY_URL: ${{ secrets.FABRIC_DEPLOY_URL }}
-          FABRIC_TOKEN: ${{ secrets.FABRIC_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${FABRIC_DEPLOY_URL:-}" ]; then
-            echo "FABRIC_DEPLOY_URL not set — skipping fabric notification (bootstrap mode)"
-            exit 0
-          fi
-          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          journal_tail="$(sudo -n journalctl -u "$SERVICE_UNIT" --since '5 minutes ago' --no-pager 2>&1 | tail -100 || echo '<no journal>')"
-          payload="$(jq -n \
-            --arg sha "$GITHUB_SHA" \
-            --arg run_url "$run_url" \
-            --arg unit "$SERVICE_UNIT" \
-            --arg journal "$journal_tail" \
-            '{sha: $sha, status: "failed", workflow_run_url: $run_url, service_unit: $unit, journal_tail: $journal}')"
-          curl --silent --fail --max-time 10 \
-            -H "Authorization: Bearer $FABRIC_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$payload" \
-            "$FABRIC_DEPLOY_URL/api/projects/$PROJECT_NAME/deploy-failures"
