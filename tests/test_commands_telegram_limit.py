@@ -35,6 +35,7 @@ EXPECTED_NON_GAMES_ENTRIES: list[tuple[str, str]] = [
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
     ("focus", "Set a sticky label spec scoping pushes + post-/forgot game button (e.g. /focus pos:noun, AND across tokens; prepend --any for OR, e.g. /focus --any type:body type:medicine); /focus clear removes it; /focus echoes current"),
+    ("top", "Show learning progress within the current /focus spec: in-progress words sorted by score (0.0-3.0+) descending, plus separate Forgotten (focus:hard) and Remembered sections"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab/labels/focus, and LLM backend usage"),
 ]
@@ -43,7 +44,7 @@ EXPECTED_NON_GAMES_ENTRIES: list[tuple[str, str]] = [
 EXPECTED_NAMES_IN_ORDER: list[str] = [
     "start", "help", "add", "remove", "list", "import", "export",
     "resetvocab", "tr", "games", "label", "unlabel", "labels",
-    "focus", "clear", "status",
+    "focus", "top", "clear", "status",
 ]
 
 
