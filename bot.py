@@ -328,6 +328,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
     ("focus", "Set a sticky label spec scoping pushes + post-/forgot game button (e.g. /focus pos:noun, AND across tokens; prepend --any for OR, e.g. /focus --any type:body type:medicine); /focus clear removes it; /focus echoes current"),
+    ("top", "Show learning progress within the current /focus spec: in-progress words sorted by score (0.0-3.0+) descending, plus separate Forgotten (focus:hard) and Remembered sections"),
     ("clear", "Reset the chat history (LLM memory)"),
     ("status", "Show host diagnostics, vocab/labels/focus, and LLM backend usage"),
 ]
@@ -887,6 +888,67 @@ async def cmd_focus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"focus set: {spec_text} ({len(matches)} word"
             f"{'s' if len(matches) != 1 else ''})"
         )
+
+
+async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report learning progress within the chat's current /focus spec.
+
+    Three sections: Top (in-progress, sorted by remembered_streak DESC, score
+    shown), Forgotten (focus:hard label), Remembered (remembered label).
+    """
+    if not is_allowed(update):
+        return
+    assert conn is not None
+    chat_id = update.effective_chat.id
+
+    focus_text = vocab.get_focus_spec(conn, chat_id)
+    if not focus_text:
+        await update.message.reply_text("no focus set — set one with /focus first")
+        return
+
+    mode, names = vocab.split_focus_spec(focus_text)
+    rows = vocab.words_matching_labels(conn, chat_id, names, mode=mode)
+    remembered_ids = vocab.remembered_word_ids(conn, chat_id)
+    hard_ids = vocab.hard_focus_word_ids(conn, chat_id)
+
+    remembered_rows = sorted(
+        [r for r in rows if r["id"] in remembered_ids],
+        key=lambda r: r["text"],
+    )
+    # Remembered wins over Forgotten if a word somehow carries both labels.
+    forgotten_rows = sorted(
+        [r for r in rows if r["id"] in hard_ids and r["id"] not in remembered_ids],
+        key=lambda r: r["text"],
+    )
+    classified = remembered_ids | hard_ids
+    top_rows = sorted(
+        [r for r in rows if r["id"] not in classified],
+        key=lambda r: (-r["remembered_streak"], r["text"]),
+    )
+
+    lines: list[str] = []
+    lines.append(f"Top ({len(top_rows)}):")
+    if top_rows:
+        lines.extend(
+            f"• {r['text']} — score {r['remembered_streak']:.1f}" for r in top_rows
+        )
+    else:
+        lines.append("  (none)")
+    lines.append("")
+    lines.append(f"Forgotten ({len(forgotten_rows)}):")
+    if forgotten_rows:
+        lines.extend(f"• {r['text']}" for r in forgotten_rows)
+    else:
+        lines.append("  (none)")
+    lines.append("")
+    lines.append(f"Remembered ({len(remembered_rows)}):")
+    if remembered_rows:
+        lines.extend(f"• {r['text']}" for r in remembered_rows)
+    else:
+        lines.append("  (none)")
+
+    for chunk in _chunk_lines(lines, MAX_MSG_LEN, ""):
+        await update.message.reply_text(chunk)
 
 
 async def cmd_resetvocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1556,6 +1618,7 @@ def main() -> None:
     app.add_handler(CommandHandler("unlabel", cmd_unlabel))
     app.add_handler(CommandHandler("labels", cmd_labels))
     app.add_handler(CommandHandler("focus", cmd_focus))
+    app.add_handler(CommandHandler("top", cmd_top))
 
     app.add_handler(CallbackQueryHandler(on_rate, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
