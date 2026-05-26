@@ -1296,8 +1296,12 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
             return
         remembered_ids = vocab.remembered_word_ids(conn, chat_id)
+        mastered_ids = vocab.mastered_word_ids(conn, chat_id)
         all_rows = vocab.list_words(conn, chat_id)
-        pool = [r for r in all_rows if r["id"] in remembered_ids]
+        pool = [
+            r for r in all_rows
+            if r["id"] in remembered_ids and r["id"] not in mastered_ids
+        ]
         try:
             rounds = repeat_module.draw_rounds(pool, rng=random.Random())
         except ValueError:

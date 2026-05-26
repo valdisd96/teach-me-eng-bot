@@ -145,10 +145,15 @@ def test_focus_hard_label_and_boost_constants() -> None:
 
 
 def test_reserved_label_names_contains_focus_hard() -> None:  # AC2a
-    # AC2a — RESERVED_LABEL_NAMES == frozenset({"remembered", "focus:hard"})
-    assert vocab.RESERVED_LABEL_NAMES == frozenset({"remembered", "focus:hard"}), (
-        f"AC2a — RESERVED_LABEL_NAMES must be exactly "
-        f"frozenset({{'remembered', 'focus:hard'}}); got "
+    # AC2a — RESERVED_LABEL_NAMES must contain both system tokens this
+    # ticket cares about; the set may carry additional system labels added
+    # by later features (e.g. `mastered`).
+    assert "remembered" in vocab.RESERVED_LABEL_NAMES, (
+        f"AC2a — RESERVED_LABEL_NAMES must contain 'remembered'; got "
+        f"{vocab.RESERVED_LABEL_NAMES!r}"
+    )
+    assert "focus:hard" in vocab.RESERVED_LABEL_NAMES, (
+        f"AC2a — RESERVED_LABEL_NAMES must contain 'focus:hard'; got "
         f"{vocab.RESERVED_LABEL_NAMES!r}"
     )
 
