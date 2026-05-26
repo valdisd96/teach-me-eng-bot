@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Literal
 
 MIN_ROUNDS = 5
-MAX_ROUNDS = 10
+MAX_ROUNDS = 5
 Direction = Literal["en2ru", "ru2en"]
 
 

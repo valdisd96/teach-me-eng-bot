@@ -54,7 +54,7 @@ def _fresh_game(n: int = 3) -> fd.Game:
 
 
 def test_draw_rounds_returns_min_max_when_no_n_max_override() -> None:  # AC1 — default n_max=MAX_ROUNDS
-    # 7 translatable rows; default n_max == MAX_ROUNDS (10) → expect 7 rounds
+    # 7 translatable rows; pool > MAX_ROUNDS → caps at MAX_ROUNDS.
     pool = _five_translatable_rows() + [
         _row(6, "book", "книга"),
         _row(7, "tree", "дерево"),
@@ -63,7 +63,6 @@ def test_draw_rounds_returns_min_max_when_no_n_max_override() -> None:  # AC1 �
     assert len(rounds) == min(fd.MAX_ROUNDS, 7), (
         f"expected min(MAX_ROUNDS, 7) rounds, got {len(rounds)}"
     )
-    assert len(rounds) == 7
 
 
 def test_draw_rounds_returns_full_max_when_pool_larger() -> None:  # AC1 + edge: pool > MAX_ROUNDS → MAX_ROUNDS

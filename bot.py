@@ -1529,7 +1529,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     rep_game = repeat_games.get(chat_id)
     if rep_game is not None and not rep_game.done:
         rd = rep_game.current()
-        correct = repeat_module.grade_answer(user_text, rd)
+        correct = await repeat_module.grade_answer_llm(user_text, rd)
         if correct:
             reply = f"✅ {rd.expected}"
         else:
