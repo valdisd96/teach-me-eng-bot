@@ -44,6 +44,7 @@ from telegram.request import HTTPXRequest
 
 import config_flow
 import db as db_module
+import focus_drill as focus_drill_module
 import games as games_module
 import irregular_verbs as irregular_module
 import llm
@@ -132,6 +133,8 @@ games: dict[int, games_module.Game] = {}
 irregulars: dict[int, irregular_module.Game] = {}
 # In-flight "Repeat (typed)" sessions: same one-per-chat semantics as `games`.
 repeat_games: dict[int, repeat_module.Game] = {}
+# In-flight "Focus drill (typed)" sessions: same one-per-chat semantics.
+focus_drills: dict[int, focus_drill_module.Game] = {}
 # Label spec captured between `/games <spec>` (or focus seed via on_play_game)
 # and the direction-picker tap, as `(mode, names)` so OR-mode focus survives the
 # round-trip. Missing entry means "no filter". Latest write wins; popped on game start.
@@ -154,6 +157,12 @@ REPEAT_NOT_ENOUGH = (
     f"(need at least {repeat_module.N_ROUNDS})"
 )
 REPEAT_PROMPT_HINT = "Type the translation."
+FOCUS_DRILL_IN_PROGRESS = "you have a focus drill in progress"
+FOCUS_DRILL_NOT_ENOUGH = (
+    f"not enough focus words yet — add more or widen /focus "
+    f"(need at least {focus_drill_module.MIN_ROUNDS})"
+)
+FOCUS_DRILL_PROMPT_HINT = "Type the translation."
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -323,7 +332,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("tr", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Pick a game: Word -> Translation, Translation -> Word (vocab quiz, 1-10 rounds; optional label filter), Irregular verbs (1-10 rounds), or Repeat typed (remembered-only words, 5 rounds, random direction). Use /games cancel to end an in-flight game."),
+    ("games", "Pick a game: Word->Translation / Translation->Word (vocab quiz, optional label filter), Irregular verbs, Repeat typed (remembered words), or Focus drill typed (in-progress /focus words). /games cancel ends an in-flight game."),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -1008,11 +1017,15 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # GAMES_IN_PROGRESS would fire and the user could never cancel.
     if len(spec_args) == 1 and spec_args[0].strip().lower() == "cancel":
         had_game = (
-            chat_id in games or chat_id in irregulars or chat_id in repeat_games
+            chat_id in games
+            or chat_id in irregulars
+            or chat_id in repeat_games
+            or chat_id in focus_drills
         )
         games.pop(chat_id, None)
         irregulars.pop(chat_id, None)
         repeat_games.pop(chat_id, None)
+        focus_drills.pop(chat_id, None)
         pending_game_filters.pop(chat_id, None)
         await update.message.reply_text(
             GAMES_CANCELLED if had_game else GAMES_NOTHING_TO_CANCEL
@@ -1026,6 +1039,9 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if chat_id in repeat_games:
         await update.message.reply_text(REPEAT_IN_PROGRESS)
+        return
+    if chat_id in focus_drills:
+        await update.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
         return
     if spec_args:
         try:
@@ -1047,7 +1063,10 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pending_game_filters.pop(chat_id, None)
         rows = [
             [InlineKeyboardButton("Irregular verbs", callback_data="gm:irr")],
-            [InlineKeyboardButton("Repeat (typed)", callback_data="gm:repeat")],
+            [
+                InlineKeyboardButton("Repeat (typed)", callback_data="gm:repeat"),
+                InlineKeyboardButton("Focus drill (typed)", callback_data="gm:focus"),
+            ],
         ]
         # Vocab buttons only when there's enough translatable vocab to play —
         # otherwise the irregular verbs game stays reachable from the same picker.
@@ -1078,6 +1097,20 @@ def _format_repeat_prompt(game: repeat_module.Game) -> str:
 
 async def _send_repeat_round(bot, chat_id: int, game: repeat_module.Game) -> None:
     await bot.send_message(chat_id=chat_id, text=_format_repeat_prompt(game))
+
+
+def _format_focus_drill_prompt(game: focus_drill_module.Game) -> str:
+    rd = game.current()
+    return (
+        f"Round {game.current_round + 1}/{game.n_rounds}: {rd.prompt}\n"
+        f"{FOCUS_DRILL_PROMPT_HINT}"
+    )
+
+
+async def _send_focus_drill_round(
+    bot, chat_id: int, game: focus_drill_module.Game
+) -> None:
+    await bot.send_message(chat_id=chat_id, text=_format_focus_drill_prompt(game))
 
 
 # --- callback handlers ------------------------------------------------------
@@ -1241,6 +1274,9 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if chat_id in repeat_games:
             await query.message.reply_text(REPEAT_IN_PROGRESS)
             return
+        if chat_id in focus_drills:
+            await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
+            return
         rounds = irregular_module.draw_rounds(rng=random.Random())
         game = irregular_module.Game(chat_id=chat_id, rounds=rounds)
         irregulars[chat_id] = game
@@ -1256,6 +1292,9 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if chat_id in repeat_games:
             await query.message.reply_text(REPEAT_IN_PROGRESS)
             return
+        if chat_id in focus_drills:
+            await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
+            return
         remembered_ids = vocab.remembered_word_ids(conn, chat_id)
         all_rows = vocab.list_words(conn, chat_id)
         pool = [r for r in all_rows if r["id"] in remembered_ids]
@@ -1267,6 +1306,32 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         game = repeat_module.Game(chat_id=chat_id, rounds=rounds)
         repeat_games[chat_id] = game
         await _send_repeat_round(context.bot, chat_id, game)
+        return
+    if query.data == "gm:focus":
+        if chat_id in games:
+            await query.message.reply_text(GAMES_IN_PROGRESS)
+            return
+        if chat_id in irregulars:
+            await query.message.reply_text(IRREGULARS_IN_PROGRESS)
+            return
+        if chat_id in repeat_games:
+            await query.message.reply_text(REPEAT_IN_PROGRESS)
+            return
+        if chat_id in focus_drills:
+            await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
+            return
+        focus_text = vocab.get_focus_spec(conn, chat_id)
+        mode, names_list = vocab.split_focus_spec(focus_text)
+        names = names_list or None
+        pool = _playable_rows(conn, chat_id, names, mode=mode)
+        try:
+            rounds = focus_drill_module.draw_rounds(pool, rng=random.Random())
+        except ValueError:
+            await query.message.reply_text(FOCUS_DRILL_NOT_ENOUGH)
+            return
+        game = focus_drill_module.Game(chat_id=chat_id, rounds=rounds)
+        focus_drills[chat_id] = game
+        await _send_focus_drill_round(context.bot, chat_id, game)
         return
     if query.data == "gm:wt":
         direction = "wt"
@@ -1283,6 +1348,9 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if chat_id in repeat_games:
         await query.message.reply_text(REPEAT_IN_PROGRESS)
+        return
+    if chat_id in focus_drills:
+        await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
         return
     stash = pending_game_filters.get(chat_id)
     if stash:
@@ -1482,6 +1550,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             repeat_games.pop(chat_id, None)
         else:
             await update.message.reply_text(_format_repeat_prompt(rep_game))
+        return
+
+    # Branch 2c: focus drill (typed) — same shape as repeat, but words are
+    # non-remembered focus-scoped rows, so we use source="game" (no forget-flip).
+    fd_game = focus_drills.get(chat_id)
+    if fd_game is not None and not fd_game.done:
+        rd = fd_game.current()
+        correct = focus_drill_module.grade_answer(user_text, rd)
+        if correct:
+            reply = f"✅ {rd.expected}"
+        else:
+            reply = f"❌ correct: {rd.expected}"
+        source_word = rd.prompt if rd.direction == "en2ru" else rd.expected
+        focus_drill_module.apply_answer(
+            fd_game, correct, source_word=source_word
+        )
+        try:
+            vocab.record_outcome(
+                conn, rd.word_id, correct=correct, weight=0.5, source="game"
+            )
+        except KeyError:
+            log.warning("record_outcome: unknown word_id %s", rd.word_id)
+        await update.message.reply_text(reply)
+        if fd_game.done:
+            await update.message.reply_text(
+                focus_drill_module.format_result(
+                    fd_game.score, fd_game.n_rounds, fd_game.wrong
+                )
+            )
+            focus_drills.pop(chat_id, None)
+        else:
+            await update.message.reply_text(_format_focus_drill_prompt(fd_game))
         return
 
     # Branch 3: just-talk. Inject vocab words into the system prompt so the
