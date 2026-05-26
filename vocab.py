@@ -548,6 +548,13 @@ def record_outcome(
     push/game pool with a 2× selection weight. This branch is gated to
     `source="repeat"` so multi-choice game misses (which run over
     non-remembered words) do not accidentally graduate words to `focus:hard`.
+
+    `source="repeat"` additionally maintains `repeat_correct_streak`: a
+    correct repeat bumps it by 1 (regardless of `weight`); a wrong repeat
+    resets it to 0. When the streak reaches `MASTERED_THRESHOLD` on a
+    correct repeat, the `mastered` system label is attached so the word is
+    excluded from the Repeat pool as well (pushes / other games already
+    exclude it via `remembered`).
     """
     if correct:
         cur = conn.execute(
@@ -564,6 +571,26 @@ def record_outcome(
     chat_id = conn.execute(
         "SELECT chat_id FROM words WHERE id = ?", (word_id,)
     ).fetchone()["chat_id"]
+    if source == "repeat":
+        if correct:
+            conn.execute(
+                "UPDATE words SET "
+                "repeat_correct_streak = repeat_correct_streak + 1 "
+                "WHERE id = ?",
+                (word_id,),
+            )
+            repeat_streak = conn.execute(
+                "SELECT repeat_correct_streak FROM words WHERE id = ?",
+                (word_id,),
+            ).fetchone()["repeat_correct_streak"]
+            if repeat_streak >= MASTERED_THRESHOLD:
+                mastered_id = get_or_create_label(conn, chat_id, MASTERED_LABEL)
+                attach_label(conn, word_id, mastered_id)
+        else:
+            conn.execute(
+                "UPDATE words SET repeat_correct_streak = 0 WHERE id = ?",
+                (word_id,),
+            )
     if correct:
         streak = conn.execute(
             "SELECT remembered_streak FROM words WHERE id = ?", (word_id,)
@@ -681,8 +708,10 @@ REMEMBERED_LABEL = "remembered"
 REMEMBERED_THRESHOLD = 3.0
 FOCUS_HARD_LABEL = "focus:hard"
 HARD_FOCUS_BOOST = 2.0
+MASTERED_LABEL = "mastered"
+MASTERED_THRESHOLD = 2
 RESERVED_LABEL_NAMES: frozenset[str] = frozenset(
-    {REMEMBERED_LABEL, FOCUS_HARD_LABEL}
+    {REMEMBERED_LABEL, FOCUS_HARD_LABEL, MASTERED_LABEL}
 )
 
 
@@ -817,6 +846,25 @@ def remembered_word_ids(
         "JOIN labels l ON l.id = wl.label_id "
         "WHERE l.chat_id = ? AND l.name = ?",
         (chat_id, REMEMBERED_LABEL),
+    ).fetchall()
+    return {r["word_id"] for r in rows}
+
+
+def mastered_word_ids(
+    conn: sqlite3.Connection, chat_id: int
+) -> set[int]:
+    """`words.id` values in `chat_id` carrying the `mastered` system label.
+
+    Used by the Repeat-game pool builder to drop words the user has answered
+    correctly twice in a row — they stay `remembered` (so pushes still
+    skip them) but leave the Repeat rotation entirely.
+    """
+    rows = conn.execute(
+        "SELECT wl.word_id AS word_id "
+        "FROM word_labels wl "
+        "JOIN labels l ON l.id = wl.label_id "
+        "WHERE l.chat_id = ? AND l.name = ?",
+        (chat_id, MASTERED_LABEL),
     ).fetchall()
     return {r["word_id"] for r in rows}
 
