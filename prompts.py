@@ -31,6 +31,14 @@ _EXPLAIN_SYSTEM = (
     "sentence that uses it. Two sentences total. No headings, no quotes, no lists."
 )
 
+_GRADE_JUDGE_SYSTEM = (
+    "You judge whether a user-typed translation is acceptable. "
+    "Accept inflection variants, minor synonyms, and missing or extra "
+    "prepositions when the meaning is preserved. Reject if the meaning "
+    "differs or essential content is missing. "
+    "Reply with exactly YES or NO — nothing else."
+)
+
 _JUST_TALK_TAIL = "\nKeep answers short: 1–2 paragraphs at most."
 
 _JUST_TALK_VOCAB = (
@@ -75,6 +83,26 @@ def explain_messages(word: str) -> list[dict]:
     return [
         {"role": "system", "content": _EXPLAIN_SYSTEM},
         {"role": "user", "content": f"Word or phrase: {word}"},
+    ]
+
+
+def grade_translation_messages(
+    prompt: str, expected: str, user_text: str
+) -> list[dict]:
+    """Build YES/NO judge messages for grading a typed translation answer.
+
+    Used by the Repeat (typed) game to tolerate inflection / synonyms /
+    missing prepositions — the LLM is the rubric, not string equality.
+    """
+    user = (
+        f"Prompt shown to user: {prompt}\n"
+        f"Expected answer: {expected}\n"
+        f"User typed: {user_text}\n\n"
+        "Acceptable?"
+    )
+    return [
+        {"role": "system", "content": _GRADE_JUDGE_SYSTEM},
+        {"role": "user", "content": user},
     ]
 
 

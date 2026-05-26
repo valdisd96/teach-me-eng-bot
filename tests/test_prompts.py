@@ -69,3 +69,45 @@ def test_just_talk_system_with_vocab_includes_words() -> None:
     out = prompts.just_talk_system("You are helpful.", ["ephemeral", "placid"])
     assert "ephemeral" in out and "placid" in out
     assert "vocabulary list" in out
+
+
+# -- grade_translation_messages (#143 — AC7) ---------------------------------
+
+
+def test_grade_translation_messages_two_dicts_system_user() -> None:
+    # AC7 — exactly 2 dicts; system first, user second.
+    msgs = prompts.grade_translation_messages("cat", "кошка", "кот")
+    assert isinstance(msgs, list), f"AC7 — must return a list, got {type(msgs).__name__}"
+    assert len(msgs) == 2, f"AC7 — must return exactly 2 dicts, got {len(msgs)}"
+    roles = [m["role"] for m in msgs]
+    assert roles == ["system", "user"], (
+        f"AC7 — element 0 must be system, element 1 must be user; got {roles}"
+    )
+
+
+def test_grade_translation_messages_user_contains_inputs() -> None:
+    # AC7 — user-role content embeds prompt, expected, user_text as literal substrings.
+    p, e, u = "to get tired of", "уставший от", "устать"
+    msgs = prompts.grade_translation_messages(p, e, u)
+    user_content = msgs[1]["content"]
+    assert p in user_content, (
+        f"AC7 — prompt {p!r} must appear literally in user content; got {user_content!r}"
+    )
+    assert e in user_content, (
+        f"AC7 — expected {e!r} must appear literally in user content; got {user_content!r}"
+    )
+    assert u in user_content, (
+        f"AC7 — user_text {u!r} must appear literally in user content; got {user_content!r}"
+    )
+
+
+def test_grade_translation_messages_system_has_yes_no_rubric() -> None:
+    # AC7 — system content carries a YES/NO rubric.
+    msgs = prompts.grade_translation_messages("cat", "кошка", "кот")
+    sys_content = msgs[0]["content"]
+    assert "YES" in sys_content, (
+        f"AC7 — system rubric must mention YES verdict; got {sys_content!r}"
+    )
+    assert "NO" in sys_content, (
+        f"AC7 — system rubric must mention NO verdict; got {sys_content!r}"
+    )

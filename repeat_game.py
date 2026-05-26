@@ -13,6 +13,9 @@ import random
 from dataclasses import dataclass, field
 from typing import Iterable, Literal
 
+import llm
+import prompts
+
 N_ROUNDS = 5
 Direction = Literal["en2ru", "ru2en"]
 
@@ -107,6 +110,33 @@ def draw_rounds(
 def grade_answer(user_text: str, rd: Round) -> bool:
     """Case-insensitive, whitespace-trimmed equality vs ``rd.expected``."""
     return user_text.strip().casefold() == rd.expected.strip().casefold()
+
+
+async def grade_answer_llm(user_text: str, rd: Round) -> bool:
+    """Tolerant grading via an LLM yes/no judge with a strict-equality fast path.
+
+    Returns True when the case-folded / whitespace-stripped ``user_text``
+    equals ``rd.expected`` (no LLM call), OR when ``llm.chat`` resolves to a
+    reply whose first non-whitespace token equals ``YES`` (case-insensitive).
+    Any other path — explicit ``NO``, unparseable reply, or transport error
+    from ``llm.chat`` — yields False, so a flaky backend degrades to strict
+    equality rather than auto-accepting.
+    """
+    if grade_answer(user_text, rd):
+        return True
+    try:
+        reply = await llm.chat(
+            prompts.grade_translation_messages(
+                rd.prompt, rd.expected, user_text
+            ),
+            max_tokens=4,
+            temperature=0.0,
+            disable_reasoning=True,
+        )
+    except Exception:  # noqa: BLE001 — any failure falls back to strict
+        return False
+    head = reply.strip().split(None, 1)[0].upper() if reply.strip() else ""
+    return head.startswith("YES")
 
 
 def apply_answer(game: Game, correct: bool, *, source_word: str) -> None:
