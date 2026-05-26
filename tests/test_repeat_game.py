@@ -1,16 +1,23 @@
-"""Tests for repeat_game.py — typed-answer Repeat mini-game (issue #127).
+"""Tests for repeat_game.py — typed-answer Repeat mini-game (issues #127, #143).
 
 Spec-driven: every assertion ties back to a numbered AC, an enumerated edge
 case, or an error condition from the latest <!-- agent-plan v1 --> comment on
-#127. The Behavioral spec only enumerates ACs for the repeat_game module;
-bot-side wiring (gm:repeat picker button, in-flight session routing,
-under-5-pool reply) is out of scope here.
+the relevant issue. The Behavioral spec only enumerates ACs for the
+repeat_game module; bot-side wiring (gm:repeat picker button, in-flight
+session routing, under-5-pool reply) is out of scope here.
+
+#143 adds AC1..AC6 covering `grade_answer_llm` — an async LLM-judged grader
+with a strict-equality fast path and a YES/NO fallback that degrades safely
+to False on any transport / parse failure. The sync `grade_answer` (AC6) is
+asserted unchanged.
 """
 
 from __future__ import annotations
 
+import asyncio
 import random
 
+import httpx
 import pytest
 
 import repeat_game as rg
@@ -269,3 +276,269 @@ def test_format_result_no_wrong_omits_wrong_line() -> None:  # AC6 — empty wro
 def test_format_result_exact_strings_from_spec_examples() -> None:  # AC6 — exact strings from spec
     assert rg.format_result(3, 5, ["apple", "tree"]) == "🎯 You scored 3/5\nWrong: apple, tree"
     assert rg.format_result(5, 5, []) == "🎯 You scored 5/5"
+
+
+# -- grade_answer_llm (#143 — AC1..AC5 + edges + errors) ---------------------
+#
+# We mock at the architectural seam: `llm.chat` is module-imported by
+# repeat_game (`import llm` then `llm.chat(...)`), so monkeypatching the
+# attribute on the `llm` module is picked up at call-time.
+
+
+class _LLMRecorder:
+    """Tracks llm.chat invocations and replies with a canned string/exception."""
+
+    def __init__(self, reply: object) -> None:
+        self.reply = reply
+        self.calls: list[list[dict]] = []
+
+    async def __call__(self, messages: list[dict], **_kwargs) -> str:
+        self.calls.append(messages)
+        if isinstance(self.reply, BaseException):
+            raise self.reply
+        return self.reply  # type: ignore[return-value]
+
+
+def _patch_llm_chat(monkeypatch: pytest.MonkeyPatch, reply: object) -> _LLMRecorder:
+    import llm as llm_mod
+
+    rec = _LLMRecorder(reply)
+    monkeypatch.setattr(llm_mod, "chat", rec)
+    return rec
+
+
+def _patch_llm_chat_must_not_be_called(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Replace llm.chat with one that fails the test if called. Used for fast-path."""
+    import llm as llm_mod
+
+    state = {"calls": 0}
+
+    async def boom(*_a, **_kw) -> str:
+        state["calls"] += 1
+        raise AssertionError(
+            "AC1 — fast path must not invoke llm.chat for exact matches"
+        )
+
+    monkeypatch.setattr(llm_mod, "chat", boom)
+    return state
+
+
+# --- AC1 — fast path: exact match returns True with no LLM call -------------
+
+
+def test_grade_answer_llm_fast_path_exact_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AC1 — exact match returns True without calling llm.chat
+    state = _patch_llm_chat_must_not_be_called(monkeypatch)
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("кошка", rd))
+    assert result is True, f"AC1 — exact match must return True, got {result!r}"
+    assert state["calls"] == 0, (
+        f"AC1 — fast path must skip llm.chat entirely, got {state['calls']} call(s)"
+    )
+
+
+def test_grade_answer_llm_fast_path_strips_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC1 + edge: leading/trailing whitespace stripped on both sides
+    state = _patch_llm_chat_must_not_be_called(monkeypatch)
+    rd = _round(expected="  кошка  ")
+    result = asyncio.run(rg.grade_answer_llm("  кошка ", rd))
+    assert result is True, (
+        f"AC1 — strip both sides on fast path; expected True, got {result!r}"
+    )
+    assert state["calls"] == 0, "edge — whitespace-stripped match must skip llm.chat"
+
+
+def test_grade_answer_llm_fast_path_case_folded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC1 + edge: mixed-case Latin and Cyrillic both case-fold equal
+    state = _patch_llm_chat_must_not_be_called(monkeypatch)
+    rd = _round(expected="Кошка")
+    result = asyncio.run(rg.grade_answer_llm("кОшКа", rd))
+    assert result is True, (
+        f"AC1 — case-fold across Cyrillic must match on fast path, got {result!r}"
+    )
+    assert state["calls"] == 0
+
+
+# --- AC2 — LLM YES verdict --------------------------------------------------
+
+
+def test_grade_answer_llm_yes_returns_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AC2 — bare "YES" → True
+    rec = _patch_llm_chat(monkeypatch, "YES")
+    rd = _round(expected="уставший от")
+    result = asyncio.run(rg.grade_answer_llm("устать", rd))
+    assert result is True, f"AC2 — bare YES must return True, got {result!r}"
+    assert len(rec.calls) == 1, (
+        f"AC2 — LLM must be consulted once when fast path misses, got {len(rec.calls)}"
+    )
+
+
+def test_grade_answer_llm_yes_dot_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC2 + edge: "Yes." → True (trailing punctuation on the first token)
+    _patch_llm_chat(monkeypatch, "Yes.")
+    rd = _round(expected="устать")
+    result = asyncio.run(rg.grade_answer_llm("уставший", rd))
+    assert result is True, f"AC2 — 'Yes.' must return True, got {result!r}"
+
+
+def test_grade_answer_llm_yes_comma_explanation_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC2 + edge: "Yes, that works" — first token "Yes," starts with YES
+    _patch_llm_chat(monkeypatch, "Yes, that works")
+    rd = _round(expected="устать")
+    result = asyncio.run(rg.grade_answer_llm("уставший", rd))
+    assert result is True, (
+        f"AC2 — 'Yes, that works' must return True (first token starts with YES), got {result!r}"
+    )
+
+
+def test_grade_answer_llm_lowercase_yes_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC2 + edge: "yes!" → True after upper-casing
+    _patch_llm_chat(monkeypatch, "yes!")
+    rd = _round(expected="устать")
+    result = asyncio.run(rg.grade_answer_llm("уставший", rd))
+    assert result is True, f"AC2 — 'yes!' must return True after upper, got {result!r}"
+
+
+# --- AC3 — LLM NO verdict ---------------------------------------------------
+
+
+def test_grade_answer_llm_no_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AC3 — "NO" → False
+    _patch_llm_chat(monkeypatch, "NO")
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, f"AC3 — bare NO must return False, got {result!r}"
+
+
+def test_grade_answer_llm_maybe_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC3 + edge: "maybe" — first token does not start with YES → False
+    _patch_llm_chat(monkeypatch, "maybe")
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, f"AC3 — 'maybe' must return False, got {result!r}"
+
+
+def test_grade_answer_llm_perhaps_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC3 + edge: "perhaps" — first token does not start with YES → False
+    _patch_llm_chat(monkeypatch, "perhaps")
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, f"AC3 — 'perhaps' must return False, got {result!r}"
+
+
+# --- AC4 — exception path collapses to False --------------------------------
+
+
+def test_grade_answer_llm_request_error_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC4 + error: httpx.RequestError → False, no propagation
+    _patch_llm_chat(monkeypatch, httpx.ConnectError("simulated"))
+    rd = _round(expected="кошка")
+    # Must NOT raise.
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, (
+        f"AC4 — transport error must collapse to False (strict-equality fallback), got {result!r}"
+    )
+
+
+def test_grade_answer_llm_http_status_error_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC4 + error: httpx.HTTPStatusError → False
+    fake_req = httpx.Request("POST", "http://x.local/")
+    fake_resp = httpx.Response(503, request=fake_req)
+    _patch_llm_chat(
+        monkeypatch, httpx.HTTPStatusError("503", request=fake_req, response=fake_resp)
+    )
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, f"AC4 — HTTPStatusError must collapse to False, got {result!r}"
+
+
+def test_grade_answer_llm_keyerror_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC4 + error: KeyError on response shape → False
+    _patch_llm_chat(monkeypatch, KeyError("choices"))
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, f"AC4 — KeyError must collapse to False, got {result!r}"
+
+
+def test_grade_answer_llm_generic_exception_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC4 — any other exception type → False
+    _patch_llm_chat(monkeypatch, RuntimeError("anything else"))
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, (
+        f"AC4 — generic exception must collapse to False, got {result!r}"
+    )
+
+
+# --- AC5 — unparseable replies collapse to False ----------------------------
+
+
+def test_grade_answer_llm_empty_reply_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC5 + edge: "" reply → False (no first token)
+    _patch_llm_chat(monkeypatch, "")
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, f"AC5 — empty reply must yield False, got {result!r}"
+
+
+def test_grade_answer_llm_whitespace_reply_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC5 + edge: "   " whitespace-only reply → False
+    _patch_llm_chat(monkeypatch, "   ")
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("собака", rd))
+    assert result is False, (
+        f"AC5 — whitespace-only reply must yield False, got {result!r}"
+    )
+
+
+# --- edge — empty user input is not an exact match; falls through to LLM ----
+
+
+def test_grade_answer_llm_empty_user_input_falls_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # edge: "" user input vs non-empty expected → fast-path miss → LLM consulted
+    rec = _patch_llm_chat(monkeypatch, "NO")
+    rd = _round(expected="кошка")
+    result = asyncio.run(rg.grade_answer_llm("", rd))
+    assert result is False, f"edge — empty input + NO verdict must return False, got {result!r}"
+    assert len(rec.calls) == 1, (
+        f"edge — empty input is not an exact match; LLM must be consulted exactly once, got {len(rec.calls)}"
+    )
+
+
+# --- AC6 — sync grade_answer is unchanged -----------------------------------
+
+
+def test_grade_answer_sync_unchanged_semantics() -> None:
+    # AC6 — sync grade_answer kept its signature and case-fold/strip equality.
+    # Signature check: still takes (user_text, rd) and returns bool.
+    import inspect
+
+    sig = inspect.signature(rg.grade_answer)
+    params = list(sig.parameters)
+    assert params == ["user_text", "rd"], (
+        f"AC6 — sync grade_answer signature must be (user_text, rd); got {params}"
+    )
+    assert not inspect.iscoroutinefunction(rg.grade_answer), (
+        "AC6 — sync grade_answer must remain synchronous (focus-drill still uses it)"
+    )
+    # Semantic check: strict case-fold/strip equality unchanged.
+    rd = _round(expected="кошка")
+    assert rg.grade_answer("Кошка", rd) is True, "AC6 — case-insensitive equality"
+    assert rg.grade_answer("  кошка  ", rd) is True, "AC6 — strip applies to user input"
+    assert rg.grade_answer("уставший", rd) is False, (
+        "AC6 — strict semantics: synonyms/inflection variants still rejected by sync grader"
+    )

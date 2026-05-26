@@ -274,3 +274,25 @@ def test_format_result_with_wrong_includes_line() -> None:  # AC10 — "🎯 You
 
 def test_format_result_zero_score_with_wrong() -> None:  # AC10 + example — "🎯 You scored 0/5\nWrong: a, b"
     assert fd.format_result(0, 5, ["a", "b"]) == "🎯 You scored 0/5\nWrong: a, b"
+
+
+# -- MAX_ROUNDS = 5 (#143 — AC8) ---------------------------------------------
+
+
+def test_max_rounds_constant_is_five() -> None:
+    # AC8 — module-level constant MAX_ROUNDS collapses from 10 to 5.
+    assert fd.MAX_ROUNDS == 5, (
+        f"AC8 — focus_drill.MAX_ROUNDS must equal 5 (was 10); got {fd.MAX_ROUNDS}"
+    )
+
+
+def test_draw_rounds_seven_row_pool_returns_five() -> None:
+    # AC8 — with a 7-row pool, draw_rounds yields exactly 5 rounds (was 7 before).
+    pool = _five_translatable_rows() + [
+        _row(6, "book", "книга"),
+        _row(7, "tree", "дерево"),
+    ]
+    rounds = fd.draw_rounds(pool, rng=random.Random(0))
+    assert len(rounds) == 5, (
+        f"AC8 — 7-row pool must cap at MAX_ROUNDS=5 (was 7 before #143); got {len(rounds)}"
+    )
