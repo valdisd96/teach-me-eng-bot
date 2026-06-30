@@ -1,0 +1,99 @@
+schema_version: 1
+project:
+  name: teach-me-eng-bot
+  display_name: Teach Me Eng Bot
+  repo: valdisd96/teach-me-eng-bot
+  default_branch: main
+  language: python
+  runtime: python-telegram-bot long-polling service
+factory:
+  board: teach-me-eng-bot
+  autonomy_phase: 1
+  required_profiles:
+    factory_manager: factory-manager
+    planner: project-planner
+    test_writer: test-writer
+    implementer: implementer
+    reviewer: code-reviewer
+    security_reviewer: security-reviewer
+    docs_keeper: docs-keeper
+    merge_babysitter: merge-babysitter
+    release_diagnoser: release-diagnoser
+  default_pipeline:
+    - project-planner
+    - test-writer
+    - implementer
+    - code-reviewer
+    - docs-keeper
+    - merge-babysitter
+commands:
+  setup: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+  test: .venv/bin/python -m pytest -q
+  lint: .venv/bin/python -m compileall -q .
+  typecheck: null
+  build: null
+  smoke: .venv/bin/python -m pytest tests/test_status_command.py tests/test_scheduler.py -q
+runtime:
+  deploy_host: root@178.105.242.161
+  deploy_key_path: /root/.ssh/id_ed25519_home
+  remote_path: /root/teach-me-eng-bot
+  systemd_service: teach-me-eng-bot.service
+  process: /root/teach-me-eng-bot/.venv/bin/python bot.py
+  persistent_state:
+    - /root/teach-me-eng-bot/.env
+    - /root/teach-me-eng-bot/data/vocab.db
+    - /root/teach-me-eng-bot/logs/
+risk_policy:
+  auto_merge:
+    docs_only: true
+    tests_only: true
+    low_risk_code: true
+    requires_all_validation_gates: true
+    blocked_when_human_approval_required: true
+  human_approval_required_for:
+    - credentials_or_secrets
+    - auth_or_session_security
+    - billing_or_provider_cost_changes
+    - destructive_file_or_data_operations
+    - production_infrastructure_changes
+    - systemd_timer_or_service_changes
+    - public_api_breaking_changes
+    - large_architecture_changes
+    - weak_or_absent_test_coverage
+    - telegram_bot_identity_or_allowed_user_changes
+    - user_data_migration_or_loss_risk
+safety:
+  blocked_paths_without_human_approval:
+    - .env
+    - "**/*secret*"
+    - "**/*token*"
+    - "**/*credential*"
+    - "**/*private_key*"
+    - .github/workflows/**
+    - infra/**
+    - install-service.sh
+    - teach-me-eng-bot.service
+    - data/**
+    - logs/**
+  destructive_patterns:
+    - "DROP TABLE"
+    - "DELETE FROM"
+    - "rm -rf"
+    - "git reset --hard"
+required_before_pr:
+  - tests_or_explained_not_applicable
+  - compile_check
+  - no_secrets_in_diff
+required_before_merge:
+  - ci_green_or_no_ci_configured_acknowledged
+  - independent_code_review
+  - docs_keeper_handoff
+  - no_protected_human_gate
+visibility:
+  telegram:
+    topic_name: teach-me-eng-bot
+    deliver: telegram:-1003902141721:632
+    source_link: https://t.me/c/3902141721/632
+notes:
+  - Non-production/personal Telegram bot project managed by Hermes Dark Factory.
+  - Preserve SQLite user data and runtime .env; never paste secret values into tickets, docs, or Telegram digests.

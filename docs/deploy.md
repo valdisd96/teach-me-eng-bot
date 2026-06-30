@@ -110,3 +110,10 @@ A grab-bag of failures that have happened or are easy to imagine. The diagnose s
 - **Zero-downtime deploys.** The `systemctl restart` step incurs a 2–5 second blip; for a single-user TG bot, this is acceptable. If multi-user load makes this matter, blue-green via two systemd units behind a routing layer is the path — not in scope today.
 - **Backups.** `data/vocab.db` is not currently backed up off-host. A user data loss recovery story is a separate concern.
 - **Multi-environment deploys** (staging, prod). One environment, one host, one deploy. Branching for env-specific config will need a second `.env` strategy.
+
+
+## Dark Factory operations
+
+Hermes Dark Factory monitors this deployment as project `teach-me-eng-bot`. The factory may inspect service health, Git state, disk usage, and recent journal output via SSH, and may perform bounded recovery (`systemctl daemon-reload` + service restart) when the service is unhealthy.
+
+Human approval is required before changing `.env`, service definitions, GitHub Actions deploy logic, destructive data operations, or deployment infrastructure.
