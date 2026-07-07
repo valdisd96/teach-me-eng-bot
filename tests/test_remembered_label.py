@@ -8,7 +8,7 @@ public surface under test:
 - `vocab.remembered_word_ids` — new query helper.
 - `vocab.record_outcome` — same signature, now auto-attaches `remembered`
   when `remembered_streak` crosses the threshold from a correct outcome.
-- `vocab.select_word` — same signature, now skips remembered rows.
+- `vocab.select_session_words` — skips remembered rows in both pools.
 - `bot.cmd_label` / `bot.cmd_unlabel` — reject reserved system labels.
 - `bot._playable_rows` — skips remembered rows; downstream
   `cmd_games` / `on_games_menu` therefore see a pool that excludes them.
@@ -548,7 +548,7 @@ def test_cmd_unlabel_mixed_reserved_and_free_rejects_whole_spec(
     )
 
 
-# === AC9 — select_word excludes remembered ==================================
+# === AC9 — select_session_words excludes remembered =========================
 
 
 def test_select_word_excludes_remembered_with_names_none(
@@ -560,7 +560,7 @@ def test_select_word_excludes_remembered_with_names_none(
 
     rng = random.Random(0)
     picks = {
-        vocab.select_word(conn, CHAT, rng=rng)["text"]
+        vocab.select_session_words(conn, CHAT, 1, rng=rng)[0]["text"]
         for _ in range(50)
     }
 
@@ -576,16 +576,18 @@ def test_select_word_excludes_remembered_with_matching_label_any(
     vocab.add_word(conn, CHAT, "alpha")
     vocab.add_word(conn, CHAT, "beta")
     # Both carry pos:noun; beta is also remembered. mode="any" with names=["pos:noun"]
-    # would pull beta in if the exclusion did not apply.
+    # would pull beta in if the exclusion did not apply. max_intro=0 forces the
+    # draw through the label-filtered regular pool (both words have reps=0 and
+    # would otherwise be intro picks that bypass names).
     _attach(conn, "alpha", "pos:noun")
     _attach(conn, "beta", "pos:noun")
     _mark_remembered(conn, "beta")
 
     rng = random.Random(0)
     picks = {
-        vocab.select_word(
-            conn, CHAT, rng=rng, names=["pos:noun"], mode="any"
-        )["text"]
+        vocab.select_session_words(
+            conn, CHAT, 1, rng=rng, names=["pos:noun"], mode="any", max_intro=0
+        )[0]["text"]
         for _ in range(50)
     }
 
@@ -606,9 +608,9 @@ def test_select_word_excludes_remembered_with_matching_label_all(
 
     rng = random.Random(0)
     picks = {
-        vocab.select_word(
-            conn, CHAT, rng=rng, names=["pos:noun"], mode="all"
-        )["text"]
+        vocab.select_session_words(
+            conn, CHAT, 1, rng=rng, names=["pos:noun"], mode="all", max_intro=0
+        )[0]["text"]
         for _ in range(50)
     }
 
@@ -618,22 +620,22 @@ def test_select_word_excludes_remembered_with_matching_label_all(
     )
 
 
-# === AC10 — select_word returns None when every word is remembered ==========
+# === AC10 — select_session_words returns [] when every word is remembered ===
 
 
 def test_select_word_returns_none_when_all_remembered(
     conn: sqlite3.Connection,
-) -> None:  # AC10 + edge — empty effective pool → None
+) -> None:  # AC10 + edge — empty effective pool → []
     vocab.add_word(conn, CHAT, "alpha")
     vocab.add_word(conn, CHAT, "beta")
     _mark_remembered(conn, "alpha")
     _mark_remembered(conn, "beta")
 
-    picked = vocab.select_word(conn, CHAT, rng=random.Random(0))
+    picked = vocab.select_session_words(conn, CHAT, 1, rng=random.Random(0))
 
-    assert picked is None, (
+    assert picked == [], (
         f"AC10 — every word remembered → effective pool is empty → must return "
-        f"None; got {picked!r}"
+        f"an empty list; got {picked!r}"
     )
 
 

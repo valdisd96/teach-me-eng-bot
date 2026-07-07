@@ -533,7 +533,7 @@ def test_record_outcome_correct_below_threshold_keeps_focus_hard(
     )
 
 
-# === AC6 — hard_focus_word_ids and select_word boost ========================
+# === AC6 — hard_focus_word_ids and select_session_words boost ===============
 
 
 def test_hard_focus_word_ids_empty(
@@ -595,7 +595,8 @@ def test_select_word_focus_hard_dominates(
 
     rng = random.Random(0)
     picks = Counter(
-        vocab.select_word(conn, CHAT, rng=rng)["text"] for _ in range(500)
+        vocab.select_session_words(conn, CHAT, 1, rng=rng)[0]["text"]
+        for _ in range(500)
     )
 
     # With both words at ~equal base weight ~8.0, the 2× boost gives beta ~16/24

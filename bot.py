@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import datetime
+import html
 import io
 import logging
 import os
@@ -139,9 +140,9 @@ focus_drills: dict[int, focus_drill_module.Game] = {}
 # In-flight daily cloze-story sessions: one per chat, replaced by the next
 # day's dispatch and cleared on completion, /games cancel, or bot restart.
 cloze_sessions: dict[int, cloze_module.Session] = {}
-# Label spec captured between `/games <spec>` (or focus seed via on_play_game)
-# and the direction-picker tap, as `(mode, names)` so OR-mode focus survives the
-# round-trip. Missing entry means "no filter". Latest write wins; popped on game start.
+# Label spec captured between `/games <spec>` and the direction-picker tap, as
+# `(mode, names)` so OR-mode focus survives the round-trip. Missing entry means
+# "no filter". Latest write wins; popped on game start.
 pending_game_filters: dict[int, tuple[Literal["all", "any"], list[str]]] = {}
 # Chats whose daily session dispatch found a typed game in flight; fired as
 # soon as that game completes or is cancelled (see _fire_deferred_session).
@@ -260,13 +261,26 @@ async def safe_edit(message, text: str, *, parse_mode: str | None = None) -> Non
             raise
 
 
-async def safe_send(bot, chat_id: int, text: str, *, parse_mode: str | None = None):
+async def safe_send(
+    bot,
+    chat_id: int,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
     """Send a new Telegram message, retrying once on RetryAfter."""
     try:
-        return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        return await bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
     except RetryAfter as e:
         await asyncio.sleep(e.retry_after + 0.5)
-        return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        return await bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
 
 
 def split_point(text: str, max_len: int) -> int:
@@ -1186,89 +1200,56 @@ async def _send_focus_drill_round(
 
 
 async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stub for the retired pre-story ✅/❌ push buttons.
+
+    The multi-push format was replaced by the daily cloze story (8dea07a);
+    taps on old messages just clear the buttons instead of rating anything.
+    """
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer("this push format is retired — daily stories replaced it")
+    try:
+        await query.edit_message_reply_markup(None)
+    except BadRequest:
+        pass  # message too old or already replaced
+
+
+async def on_explain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """💡 button under a story result's missed word — meaning + one example."""
     if not is_allowed(update):
         return
     assert conn is not None
     query = update.callback_query
     await query.answer()
     try:
-        _, verdict, push_id_s, word_id_s = query.data.split(":")
-        push_id, word_id = int(push_id_s), int(word_id_s)
+        _, word_id_s = query.data.split(":")
+        word_id = int(word_id_s)
     except (ValueError, AttributeError):
-        log.warning("Malformed rate callback: %r", query.data)
+        log.warning("Malformed exp callback: %r", query.data)
         return
-    rating = Rating.Good if verdict == "good" else Rating.Again
-    try:
-        vocab.rate_word(conn, word_id, rating)
-        vocab.record_outcome(
-            conn, word_id, correct=(rating == Rating.Good), weight=1.0, source="push"
-        )
-    except KeyError:
-        log.warning("rate_word: unknown word_id %s", word_id)
-    sched_module.mark_rated(conn, push_id)
-    label = "✅ rated: knew" if rating == Rating.Good else "❌ rated: forgot"
-    try:
-        await query.edit_message_reply_markup(
-            InlineKeyboardMarkup(
-                [[InlineKeyboardButton(label, callback_data="noop")]]
-            )
-        )
-    except BadRequest:
-        pass  # message too old or already replaced
-
-    # On ❌ forgot, follow up with a tiny definition + example so the user can
-    # learn the word on the spot.
-    if rating != Rating.Again:
-        return
+    chat_id = update.effective_chat.id
     try:
         explanation = await sched_module.compose_explanation(
             conn, word_id, llm_chat=_push_llm_chat
         )
-    except Exception as e:  # noqa: BLE001 — a failed explain shouldn't break rating
+    except Exception as e:  # noqa: BLE001 — surface a soft failure to the user
         log.error("explain failed for word %s: %s", word_id, e)
-        return
+        explanation = None
     if not explanation:
+        await query.message.reply_text(
+            "⚠️ couldn't fetch an explanation right now — try again later"
+        )
         return
-    chat_id = update.effective_chat.id
-    # Reuse the rated word's text for the transcript tag and to mark it inline
-    # under the 📌-header that matches the push format. Empty target_word when
-    # the row vanished between rating and explanation suppresses the header.
     row = conn.execute(
         "SELECT text FROM words WHERE id = ?", (word_id,)
     ).fetchone()
-    tag_word = row["text"] if row is not None else "?"
-    target_word = row["text"] if row is not None else ""
-    formatted = vocab.format_push_body(target_word, explanation)
-
-    # Tack on a single-word translation into the chat's configured target
-    # language. A failure here mustn't drop the explanation itself.
-    translation: str | None = None
-    settings = config_flow.load_settings(conn, chat_id)
-    if settings is not None:
-        try:
-            translation = await sched_module.compose_translation(
-                conn,
-                word_id,
-                settings.target_lang,
-                translate_fn=lambda w, t: asyncio.to_thread(
-                    translator.translate, w, t, "en"
-                ),
-            )
-        except Exception as e:  # noqa: BLE001
-            log.error("translate for explain failed for word %s: %s", word_id, e)
-
-    body = sched_module.format_explanation_reply(formatted, translation)
-    transcript = explanation if not translation else f"{explanation}\n→ {translation}"
-    play_kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🎮 Play game", callback_data="pg:start")]]
+    word = row["text"] if row is not None else "?"
+    await query.message.reply_text(
+        f"💡 <b>{html.escape(word)}</b>\n{html.escape(explanation)}",
+        parse_mode="HTML",
     )
-    try:
-        await query.message.reply_text(
-            body, parse_mode="HTML", reply_markup=play_kb, do_quote=True
-        )
-        append_turn(chat_id, "explain", f"[{tag_word}] {transcript}")
-    except Exception as e:  # noqa: BLE001
-        log.error("failed to send explanation for chat %s: %s", chat_id, e)
+    append_turn(chat_id, "explain", f"[{word}] {explanation}")
 
 
 async def on_add_vocab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1399,43 +1380,6 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _send_round(context.bot, chat_id, game)
 
 
-async def on_play_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Open the games direction-picker from the ❌-forgot explanation reply.
-
-    Mirrors `cmd_games`'s gates (in-progress, MIN_VOCAB) and posts the same
-    `gm:wt` / `gm:tw` menu. When the chat has a sticky `/focus` set, its
-    names are seeded into `pending_game_filters` so the round draw uses the
-    same restricted pool that pushes use.
-    """
-    if not is_allowed(update):
-        return
-    assert conn is not None
-    query = update.callback_query
-    await query.answer()
-    chat_id = update.effective_chat.id
-    in_progress = _in_progress_reply(chat_id)
-    if in_progress:
-        await query.message.reply_text(in_progress)
-        return
-    focus_text = vocab.get_focus_spec(conn, chat_id)
-    mode, names_list = vocab.split_focus_spec(focus_text)
-    names = names_list or None
-    if len(_playable_rows(conn, chat_id, names, mode=mode)) < games_module.MIN_VOCAB:
-        await query.message.reply_text(
-            GAMES_NO_LABEL_MATCH if names else GAMES_NEED_VOCAB
-        )
-        return
-    if names:
-        pending_game_filters[chat_id] = (mode, names)
-    else:
-        pending_game_filters.pop(chat_id, None)
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Word → Translation", callback_data="gm:wt"),
-        InlineKeyboardButton("Translation → Word", callback_data="gm:tw"),
-    ]])
-    await query.message.reply_text("Pick a game:", reply_markup=kb)
-
-
 async def on_game_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
@@ -1559,7 +1503,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if cz.push_id is not None:
                 sched_module.mark_rated(conn, cz.push_id)
             result = cloze_module.format_result(cz)
-            await safe_send(context.bot, chat_id, result, parse_mode="HTML")
+            # Missed words get a 💡 explain button each — the story-session
+            # replacement for the old ❌-forgot explanation follow-up.
+            missed = [b for b in cz.blanks if b.word in cz.wrong]
+            kb = (
+                InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                f"💡 {b.word}", callback_data=f"exp:{b.word_id}"
+                            )
+                        ]
+                        for b in missed
+                    ]
+                )
+                if missed
+                else None
+            )
+            await safe_send(
+                context.bot, chat_id, result, parse_mode="HTML", reply_markup=kb
+            )
             append_turn(
                 chat_id, "story-result", f"{cz.score}/{cz.n_blanks}"
             )
@@ -1822,7 +1785,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_resetvocab_confirm, pattern=r"^rv:"))
     app.add_handler(CallbackQueryHandler(on_add_vocab, pattern=r"^av:"))
     app.add_handler(CallbackQueryHandler(on_games_menu, pattern=r"^gm:"))
-    app.add_handler(CallbackQueryHandler(on_play_game, pattern=r"^pg:"))
+    app.add_handler(CallbackQueryHandler(on_explain, pattern=r"^exp:"))
     app.add_handler(CallbackQueryHandler(on_game_answer, pattern=r"^g:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
 

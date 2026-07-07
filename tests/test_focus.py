@@ -6,14 +6,13 @@ function bodies.
 
 Public surface under test:
 - `vocab.get_focus_spec` / `vocab.set_focus_spec` (new).
-- `vocab.select_word(..., names=...)` (extended).
+- `vocab.select_session_words(..., names=...)`.
 - `scheduler.compose_push(..., names=...)` (extended).
 - `bot.cmd_focus` (new) + COMMANDS entry + handler registration.
 - `bot.dispatch_push` reading the focus + passing it through.
-- `bot.on_play_game` seeding/clearing `pending_game_filters` from the focus.
 
-Mocking shape mirrors `tests/test_play_game_button.py` and
-`tests/test_games_label_spec.py` — Telegram Update / Context are MagicMock +
+Mocking shape mirrors `tests/test_games_label_spec.py` — Telegram Update /
+Context are MagicMock +
 AsyncMock at the architectural seam, with `bot.conn` patched to the temp-DB
 fixture.
 """
@@ -255,7 +254,7 @@ def test_init_db_idempotent_with_focus_spec_column(
         c.close()
 
 
-# === vocab.select_word(names=...) ============================================
+# === vocab.select_session_words(names=...) ===================================
 
 
 def test_select_word_with_names_filters_by_AND(
@@ -271,14 +270,16 @@ def test_select_word_with_names_filters_by_AND(
     _attach(conn, CHAT, "aspirin", "pos:noun")
     _attach(conn, CHAT, "aspirin", "type:medicine")
 
+    # max_intro=0: all three words have reps=0, and intro picks bypass names —
+    # forcing the regular pool makes the label filter observable.
     rng = random.Random(0)
     seen: set[str] = set()
     for _ in range(60):
-        row = vocab.select_word(
-            conn, CHAT, names=["pos:noun", "type:medicine"], rng=rng
+        rows = vocab.select_session_words(
+            conn, CHAT, 1, names=["pos:noun", "type:medicine"], max_intro=0, rng=rng
         )
-        assert row is not None, "filtered pool is non-empty; select_word must return a row"
-        seen.add(row["text"])
+        assert rows, "filtered pool is non-empty; select_session_words must return a row"
+        seen.add(rows[0]["text"])
 
     assert seen == {"pill", "aspirin"}, (
         f"AND across pos:noun + type:medicine should sample only pill/aspirin; got {sorted(seen)}"
@@ -294,11 +295,15 @@ def test_select_word_empty_names_preserves_unfiltered(
     seen_none: set[str] = set()
     seen_empty: set[str] = set()
     for _ in range(40):
-        r1 = vocab.select_word(conn, CHAT, names=None, rng=random.Random())
-        r2 = vocab.select_word(conn, CHAT, names=[], rng=random.Random())
-        assert r1 is not None and r2 is not None
-        seen_none.add(r1["text"])
-        seen_empty.add(r2["text"])
+        r1 = vocab.select_session_words(
+            conn, CHAT, 1, names=None, max_intro=0, rng=random.Random()
+        )
+        r2 = vocab.select_session_words(
+            conn, CHAT, 1, names=[], max_intro=0, rng=random.Random()
+        )
+        assert r1 and r2
+        seen_none.add(r1[0]["text"])
+        seen_empty.add(r2[0]["text"])
 
     assert seen_none == {"alpha", "beta"}, (
         f"names=None must keep today's unfiltered pool; got {sorted(seen_none)}"
@@ -310,14 +315,16 @@ def test_select_word_empty_names_preserves_unfiltered(
 
 def test_select_word_zero_matching_names_returns_none(
     conn: sqlite3.Connection,
-) -> None:  # AC3 / example — names match nothing → None (no exception)
+) -> None:  # AC3 / example — names match nothing → [] (no exception)
     vocab.add_word(conn, CHAT, "horse")
     _attach(conn, CHAT, "horse", "pos:noun")
 
-    out = vocab.select_word(conn, CHAT, names=["type:medicine"], rng=random.Random(0))
+    out = vocab.select_session_words(
+        conn, CHAT, 1, names=["type:medicine"], max_intro=0, rng=random.Random(0)
+    )
 
-    assert out is None, (
-        f"select_word must return None when the filtered pool is empty; got {out!r}"
+    assert out == [], (
+        f"select_session_words must return [] when the filtered pool is empty; got {out!r}"
     )
 
 
@@ -360,7 +367,7 @@ def test_compose_session_returns_none_when_filter_pool_empty(
 
 def test_compose_session_passes_names_to_select_session_words(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC3 — names is forwarded to vocab.select_word
+) -> None:  # AC3 — names is forwarded to vocab.select_session_words
     import config_flow
 
     config_flow.save_settings(
@@ -370,7 +377,7 @@ def test_compose_session_passes_names_to_select_session_words(
     )
     vocab.add_word(conn, CHAT, "horse")
     # Graduate out of the introduction pool so the push takes the
-    # select_word path this test spies on.
+    # select_session_words path this test spies on.
     conn.execute(
         "UPDATE words SET reps = ? WHERE chat_id = ?",
         (vocab.INTRO_GRADUATION_REPS, CHAT),
@@ -707,85 +714,6 @@ def test_dispatch_push_when_compose_returns_none_sends_nothing(
     )
 
 
-# === bot.on_play_game (focus seeding) ========================================
-
-
-def test_on_play_game_seeds_filter_from_focus(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC4 — focus → pending_game_filters[chat] seeded with parsed names
-    _patch_bot(monkeypatch, conn)
-    matching = [f"m{i}" for i in range(games_module.MIN_VOCAB)]
-    _seed_translatable(conn, CHAT, matching)
-    for w in matching:
-        _attach(conn, CHAT, w, "pos:noun")
-    vocab.set_focus_spec(conn, CHAT, "pos:noun")
-
-    update = _make_callback_update("pg:start")
-    asyncio.run(bot.on_play_game(update, _make_context([])))
-
-    assert bot.pending_game_filters.get(CHAT) == ("all", ["pos:noun"]), (
-        f"AC4: on_play_game must seed pending_game_filters with (mode, names); got "
-        f"{bot.pending_game_filters!r}"
-    )
-
-
-def test_on_play_game_clears_filter_when_no_focus(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC4 — no focus → dict entry cleared (not preserved from prior /games)
-    _patch_bot(monkeypatch, conn)
-    _seed_translatable(
-        conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
-    )
-    # Stale leftover from a prior /games <spec> that must NOT survive.
-    bot.pending_game_filters[CHAT] = ("all", ["was-here"])
-    assert vocab.get_focus_spec(conn, CHAT) is None  # precondition: no focus
-
-    update = _make_callback_update("pg:start")
-    asyncio.run(bot.on_play_game(update, _make_context([])))
-
-    assert CHAT not in bot.pending_game_filters, (
-        "AC4: when no focus is set, on_play_game must CLEAR the stash entry; "
-        f"got {bot.pending_game_filters!r}"
-    )
-
-
-def test_on_play_game_then_picker_uses_focus_filtered_pool(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC4 — end-to-end: focus → pg:start → gm:wt draws only from filtered pool
-    _patch_bot(monkeypatch, conn)
-    matching = [f"m{i}" for i in range(games_module.MIN_VOCAB)]
-    other = [f"o{i}" for i in range(games_module.MIN_VOCAB)]
-    _seed_translatable(conn, CHAT, matching + other)
-    for w in matching:
-        _attach(conn, CHAT, w, "pos:noun")
-    vocab.set_focus_spec(conn, CHAT, "pos:noun")
-    matching_ids = {_word_id(conn, CHAT, w) for w in matching}
-
-    # Step 1: tap "🎮 Play game" — this should seed the focus into the stash.
-    pg_update = _make_callback_update("pg:start")
-    asyncio.run(bot.on_play_game(pg_update, _make_context([])))
-    assert bot.pending_game_filters.get(CHAT) == ("all", ["pos:noun"]), (
-        "precondition: on_play_game must seed the stash before picker tap; got "
-        f"{bot.pending_game_filters!r}"
-    )
-
-    # Step 2: tap a direction button — the same on_games_menu path #85 wired up
-    # must consume the seeded stash and draw rounds from the filtered pool only.
-    gm_update = _make_callback_update("gm:wt")
-    asyncio.run(bot.on_games_menu(gm_update, _make_context([])))
-
-    game = bot.games.get(CHAT)
-    assert game is not None, (
-        "AC4: a viable focus-filtered pool must start a game on the picker tap"
-    )
-    round_ids = {r.word_id for r in game.rounds}
-    assert round_ids, "AC4: started game must have at least one round"
-    assert round_ids.issubset(matching_ids), (
-        "AC4: rounds must be drawn ONLY from the focus-filtered pool; "
-        f"unexpected ids leaked = {round_ids - matching_ids}"
-    )
-
-
 # === COMMANDS surface / handler registration ================================
 
 
@@ -957,34 +885,37 @@ def test_words_matching_labels_any_dedupes_duplicates(
     )
 
 
-# === vocab.select_word(mode="any") ==========================================
+# === vocab.select_session_words(mode="any") ==================================
 
 
 def test_select_word_mode_any_filters_by_or(
     conn: sqlite3.Connection,
-) -> None:  # AC2 — select_word(mode='any') samples from the OR pool only
+) -> None:  # AC2 — select_session_words(mode='any') samples from the OR pool only
     vocab.add_word(conn, CHAT, "horse")
     vocab.add_word(conn, CHAT, "pill")
     vocab.add_word(conn, CHAT, "stone")
     _attach(conn, CHAT, "horse", "type:body")
     _attach(conn, CHAT, "pill", "type:medicine")
-    # 'stone' unlabelled.
+    # 'stone' unlabelled. max_intro=0 so the label filter is exercised
+    # (intro picks would bypass names for these reps=0 words).
 
     rng = random.Random(0)
     seen: set[str] = set()
     for _ in range(60):
-        row = vocab.select_word(
+        rows = vocab.select_session_words(
             conn,
             CHAT,
+            1,
             names=["type:body", "type:medicine"],
             mode="any",
+            max_intro=0,
             rng=rng,
         )
-        assert row is not None, "OR pool is non-empty; select_word must return a row"
-        seen.add(row["text"])
+        assert rows, "OR pool is non-empty; select_session_words must return a row"
+        seen.add(rows[0]["text"])
 
     assert seen == {"horse", "pill"}, (
-        f"AC2: mode='any' must restrict select_word to the OR pool — "
+        f"AC2: mode='any' must restrict select_session_words to the OR pool — "
         f"'stone' must NEVER surface; got {sorted(seen)}"
     )
 
@@ -994,7 +925,7 @@ def test_select_word_mode_any_filters_by_or(
 
 def test_compose_session_passes_mode_to_select_session_words(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC2 — compose_push forwards mode to vocab.select_word
+) -> None:  # AC2 — compose_session forwards mode to vocab.select_session_words
     import config_flow
 
     config_flow.save_settings(
@@ -1005,7 +936,7 @@ def test_compose_session_passes_mode_to_select_session_words(
     vocab.add_word(conn, CHAT, "horse")
     _attach(conn, CHAT, "horse", "type:body")
     # Graduate out of the introduction pool so the push takes the
-    # select_word path this test spies on.
+    # select_session_words path this test spies on.
     conn.execute(
         "UPDATE words SET reps = ? WHERE chat_id = ?",
         (vocab.INTRO_GRADUATION_REPS, CHAT),
@@ -1333,27 +1264,4 @@ def test_dispatch_push_with_legacy_spec_forwards_mode_all(
     assert kwargs.get("mode") == "all", (
         f"AC6: legacy spec (no --any) must default to mode='all' so pre-upgrade "
         f"behaviour is preserved; got mode={kwargs.get('mode')!r}"
-    )
-
-
-# === bot.on_play_game (--any seeding) =======================================
-
-
-def test_on_play_game_seeds_any_mode_without_flag_token(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC11 — OR-focus → stash = ("any", [labels]), --any token NOT in names
-    _patch_bot(monkeypatch, conn)
-    matching = [f"m{i}" for i in range(games_module.MIN_VOCAB)]
-    _seed_translatable(conn, CHAT, matching)
-    for w in matching:
-        _attach(conn, CHAT, w, "type:body")
-    vocab.set_focus_spec(conn, CHAT, "--any type:body type:medicine")
-
-    update = _make_callback_update("pg:start")
-    asyncio.run(bot.on_play_game(update, _make_context([])))
-
-    stash = bot.pending_game_filters.get(CHAT)
-    assert stash == ("any", ["type:body", "type:medicine"]), (
-        f"AC11: OR-focus must seed the stash as ('any', [labels]) with --any "
-        f"stripped from the names list; got {stash!r}"
     )

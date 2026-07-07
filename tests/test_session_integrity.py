@@ -385,19 +385,6 @@ def test_games_menu_blocked_during_story(
     assert CHAT not in bot.repeat_games
 
 
-def test_play_game_button_blocked_during_story(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(bot, "conn", conn)
-    bot.cloze_sessions[CHAT] = _session([(1, "horse")])
-    update = _make_callback_update("pg:start")
-    asyncio.run(bot.on_play_game(update, _make_context()))
-    assert (
-        _last_reply(update.callback_query.message.reply_text)
-        == bot.STORY_IN_PROGRESS
-    )
-
-
 # --- bot: stray text must not be graded --------------------------------------------
 
 

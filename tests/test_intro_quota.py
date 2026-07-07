@@ -6,14 +6,12 @@ introduction pool. `vocab.select_session_words` seeds up to
 bypassing the /focus label filter — so a freshly `/add`-ed unlabelled word
 is guaranteed exposure even under an active focus. Covered here:
 
-- `vocab.select_intro_word` pool membership (reps cutoff, remembered
-  exclusion, empty pool, deterministic sampling).
-- `vocab.select_session_words` wiring: intro seeding + focus bypass, focus
-  scoping of the regular picks, fallback when the intro pool is empty,
-  no duplicates, sub-`n` results on small pools.
+- `vocab.select_session_words` wiring: intro seeding + focus bypass
+  (reps cutoff, remembered exclusion), focus scoping of the regular picks,
+  fallback when the intro pool is empty, no duplicates, sub-`n` results
+  on small pools.
 - `scheduler.compose_session` marks intro words so the session message can
   badge them 🆕.
-- `vocab.format_push_body` 🆕 badge (still used by the ❌-miss explain reply).
 """
 
 from __future__ import annotations
@@ -53,64 +51,6 @@ def _set_reps(conn: sqlite3.Connection, text: str, reps: int) -> None:
         "UPDATE words SET reps = ? WHERE chat_id = ? AND text = ?",
         (reps, CHAT, text),
     )
-
-
-# --- vocab.select_intro_word --------------------------------------------------
-
-
-def test_select_intro_word_returns_only_underrated_words(
-    conn: sqlite3.Connection,
-) -> None:
-    _seed_chat(conn)
-    vocab.add_word(conn, CHAT, "fresh")
-    vocab.add_word(conn, CHAT, "graduated")
-    _set_reps(conn, "graduated", vocab.INTRO_GRADUATION_REPS)
-
-    for seed in range(10):
-        row = vocab.select_intro_word(conn, CHAT, rng=random.Random(seed), now=NOW)
-        assert row is not None
-        assert row["text"] == "fresh", (
-            f"only reps < {vocab.INTRO_GRADUATION_REPS} words belong to the "
-            f"introduction pool; got {row['text']!r}"
-        )
-
-
-def test_select_intro_word_excludes_remembered(conn: sqlite3.Connection) -> None:
-    _seed_chat(conn)
-    vocab.add_word(conn, CHAT, "fresh")
-    vocab.add_word(conn, CHAT, "known")
-    label_id = vocab.get_or_create_label(conn, CHAT, vocab.REMEMBERED_LABEL)
-    vocab.attach_label(conn, _word_id(conn, "known"), label_id)
-
-    for seed in range(10):
-        row = vocab.select_intro_word(conn, CHAT, rng=random.Random(seed), now=NOW)
-        assert row is not None and row["text"] == "fresh", (
-            "remembered words must not resurface through introduction seeding"
-        )
-
-
-def test_select_intro_word_none_when_pool_empty(conn: sqlite3.Connection) -> None:
-    _seed_chat(conn)
-    assert vocab.select_intro_word(conn, CHAT, now=NOW) is None
-
-    vocab.add_word(conn, CHAT, "graduated")
-    _set_reps(conn, "graduated", vocab.INTRO_GRADUATION_REPS)
-    assert vocab.select_intro_word(conn, CHAT, now=NOW) is None, (
-        "a fully graduated vocab has no introduction pool"
-    )
-
-
-def test_select_intro_word_is_deterministic_with_seeded_rng(
-    conn: sqlite3.Connection,
-) -> None:
-    _seed_chat(conn)
-    for w in ("alpha", "beta", "gamma", "delta"):
-        vocab.add_word(conn, CHAT, w)
-
-    first = vocab.select_intro_word(conn, CHAT, rng=random.Random(42), now=NOW)
-    second = vocab.select_intro_word(conn, CHAT, rng=random.Random(42), now=NOW)
-    assert first is not None and second is not None
-    assert first["id"] == second["id"]
 
 
 # --- vocab.select_session_words -------------------------------------------------
@@ -227,17 +167,3 @@ def test_compose_session_intro_flag_drives_new_word_section(
     assert flags == {"fresh": True, "veteran": False}
     body = cloze.format_session_message(session, rng=random.Random(0))
     assert "🆕" in body and "fresh" in body
-
-
-# --- vocab.format_push_body badge ----------------------------------------------
-
-
-def test_format_push_body_intro_badge() -> None:
-    plain = vocab.format_push_body("frog", "a frog jumped")
-    badged = vocab.format_push_body("frog", "a frog jumped", intro=True)
-    assert "🆕" not in plain
-    assert badged.splitlines()[0].endswith("🆕"), (
-        f"intro pushes must badge the header line; got {badged.splitlines()[0]!r}"
-    )
-    # Body is untouched — only the header changes.
-    assert badged.splitlines()[2:] == plain.splitlines()[2:]

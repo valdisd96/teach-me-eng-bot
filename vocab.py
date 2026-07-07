@@ -311,21 +311,12 @@ def remove_word(conn: sqlite3.Connection, chat_id: int, text: str) -> bool:
 def list_words(
     conn: sqlite3.Connection,
     chat_id: int,
-    contains: str | None = None,
 ) -> list[sqlite3.Row]:
-    """All words for a chat, optionally filtered by substring.
+    """All words for a chat.
 
     Ordered by mention_count ASC, then added_at DESC — surfaces the least-
     mentioned and newest additions first, which is what `/list` wants.
     """
-    if contains:
-        needle = f"%{_normalize(contains)}%"
-        return conn.execute(
-            "SELECT * FROM words "
-            "WHERE chat_id = ? AND text LIKE ? "
-            "ORDER BY mention_count ASC, added_at DESC",
-            (chat_id, needle),
-        ).fetchall()
     return conn.execute(
         "SELECT * FROM words WHERE chat_id = ? "
         "ORDER BY mention_count ASC, added_at DESC",
@@ -405,65 +396,6 @@ def highlight_matches(text: str, words: list[str]) -> str:
         cursor = e
     out.append(html.escape(text[cursor:]))
     return "".join(out)
-
-
-PUSH_HEADER_PREFIX = "\U0001F4CC"  # 📌 — anchors the chosen vocab word above the snippet.
-
-
-def mark_target_word(text: str, target: str) -> str:
-    """HTML-escape `text` and wrap case-insensitive matches of `target` in <b>…</b>.
-
-    Unlike `highlight_matches`, only the single `target` word/phrase is marked —
-    other vocab words that happen to appear in the snippet stay plain. Markdown
-    bold markers (`**x**` / `__x__`) are stripped first so they never reach
-    Telegram's HTML renderer literally. Empty `text` short-circuits to "".
-    Empty `target` returns the HTML-escaped text with no bolding. Output is
-    safe to send with Telegram's HTML parse mode.
-    """
-    if not text:
-        return ""
-    text = _MD_BOLD_RE.sub(lambda m: m.group(1) or m.group(2), text)
-    if not target:
-        return html.escape(text)
-    haystack = text.lower()
-    needle = target.lower()
-    spans: list[tuple[int, int]] = []
-    i = 0
-    while True:
-        idx = haystack.find(needle, i)
-        if idx == -1:
-            break
-        end = idx + len(needle)
-        spans.append((idx, end))
-        i = end
-    out: list[str] = []
-    cursor = 0
-    for s, e in spans:
-        out.append(html.escape(text[cursor:s]))
-        out.append("<b>")
-        out.append(html.escape(text[s:e]))
-        out.append("</b>")
-        cursor = e
-    out.append(html.escape(text[cursor:]))
-    return "".join(out)
-
-
-def format_push_body(target: str, text: str, *, intro: bool = False) -> str:
-    """Compose `📌 <b>target</b>` header + a body where `target` is bolded inline.
-
-    The header anchors the chosen vocab word so the user can identify it at a
-    glance even when the snippet uses an inflected form or sits inside dense
-    prose. Header and body are separated by a blank line. When `target` is
-    empty the header is omitted (defensive — production callers always have a
-    word). `intro=True` appends a 🆕 badge to the header so introduction-slot
-    pushes (new words still bypassing /focus) are recognisable. Both halves
-    are HTML-safe.
-    """
-    body = mark_target_word(text, target)
-    if not target:
-        return body
-    badge = " 🆕" if intro else ""
-    return f"{PUSH_HEADER_PREFIX} <b>{html.escape(target)}</b>{badge}\n\n{body}"
 
 
 def bump_mentions(conn: sqlite3.Connection, word_ids: list[int]) -> None:
@@ -673,58 +605,6 @@ def compute_scores(
     return [round(w / top * 100) for w in weights]
 
 
-def select_word(
-    conn: sqlite3.Connection,
-    chat_id: int,
-    *,
-    names: list[str] | None = None,
-    mode: Literal["all", "any"] = "all",
-    rng: random.Random | None = None,
-    now: datetime.datetime | None = None,
-) -> sqlite3.Row | None:
-    """Sample one word for this chat using the weighted formula. None if empty.
-
-    When `names` is non-empty, the candidate pool is restricted via
-    `words_matching_labels` — `mode="all"` (default) requires every label,
-    `mode="any"` requires at least one. Empty `names` (or None) preserves the
-    unfiltered pool regardless of `mode`. Words carrying the `remembered`
-    system label are always excluded, regardless of `names`/`mode` — they
-    have auto-graduated and stop appearing in pushes.
-    """
-    now = now or _now_dt()
-    if names:
-        rows = words_matching_labels(conn, chat_id, names, mode=mode)
-    else:
-        rows = conn.execute(
-            "SELECT * FROM words WHERE chat_id = ?", (chat_id,)
-        ).fetchall()
-    return _sample_weighted(conn, chat_id, rows, rng=rng, now=now)
-
-
-def select_intro_word(
-    conn: sqlite3.Connection,
-    chat_id: int,
-    *,
-    rng: random.Random | None = None,
-    now: datetime.datetime | None = None,
-) -> sqlite3.Row | None:
-    """Sample one introduction-phase word (fewer than INTRO_GRADUATION_REPS
-    FSRS ratings). None if the chat has no such words.
-
-    Deliberately ignores any /focus label filter: this is the pool of words
-    the user just added, and the whole point of introduction slots is that a
-    fresh word surfaces even before it has labels. Words carrying the
-    `remembered` system label are still excluded (a word can graduate through
-    games without ever being push-rated). Sampling reuses the standard weight
-    formula, so among intro words the most recently added lean heaviest.
-    """
-    rows = conn.execute(
-        "SELECT * FROM words WHERE chat_id = ? AND reps < ?",
-        (chat_id, INTRO_GRADUATION_REPS),
-    ).fetchall()
-    return _sample_weighted(conn, chat_id, rows, rng=rng, now=now)
-
-
 def select_session_words(
     conn: sqlite3.Connection,
     chat_id: int,
@@ -792,27 +672,6 @@ def _sample_weighted_many(
         picked.append(choice)
         pool = [r for r in pool if r["id"] != choice["id"]]
     return picked
-
-
-def _sample_weighted(
-    conn: sqlite3.Connection,
-    chat_id: int,
-    rows: list[sqlite3.Row],
-    *,
-    rng: random.Random | None = None,
-    now: datetime.datetime | None = None,
-) -> sqlite3.Row | None:
-    """Weighted-random pick from `rows`, minus `remembered` words. None if empty."""
-    now = now or _now_dt()
-    excluded = remembered_word_ids(conn, chat_id)
-    if excluded:
-        rows = [r for r in rows if r["id"] not in excluded]
-    if not rows:
-        return None
-    hard_ids = hard_focus_word_ids(conn, chat_id)
-    weights = [compute_weight(r, now, hard_word_ids=hard_ids) for r in rows]
-    pick = (rng or random).choices(rows, weights=weights, k=1)
-    return pick[0]
 
 
 # --- labels (per-chat many-to-many tags on words) ---------------------------

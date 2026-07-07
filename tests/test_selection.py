@@ -153,18 +153,19 @@ def test_compute_scores_normalizes_against_max(conn: sqlite3.Connection) -> None
     assert by_text["mastered"] < by_text["fresh"]
 
 
-# --- select_word -------------------------------------------------------------
+# --- select_session_words (single-word draws) --------------------------------
 
 
 def test_select_returns_none_when_empty(conn: sqlite3.Connection) -> None:
     vocab.ensure_chat(conn, CHAT)
-    assert vocab.select_word(conn, CHAT) is None
+    assert vocab.select_session_words(conn, CHAT, 1) == []
 
 
 def test_select_returns_only_candidate(conn: sqlite3.Connection) -> None:
     vocab.add_word(conn, CHAT, "only_option")
-    picked = vocab.select_word(conn, CHAT, rng=random.Random(0))
-    assert picked["text"] == "only_option"
+    picked = vocab.select_session_words(conn, CHAT, 1, rng=random.Random(0))
+    assert len(picked) == 1
+    assert picked[0]["text"] == "only_option"
 
 
 def test_select_prefers_new_and_unmentioned_in_aggregate(
@@ -179,7 +180,8 @@ def test_select_prefers_new_and_unmentioned_in_aggregate(
 
     rng = random.Random(42)
     picks = [
-        vocab.select_word(conn, CHAT, rng=rng)["text"] for _ in range(400)
+        vocab.select_session_words(conn, CHAT, 1, rng=rng)[0]["text"]
+        for _ in range(400)
     ]
     # With weights ~8 vs ~2.2 the odds are ~3.6:1 in favour of "fresh".
     fresh_count = picks.count("fresh")
@@ -190,5 +192,5 @@ def test_select_prefers_new_and_unmentioned_in_aggregate(
 def test_select_scopes_to_chat(conn: sqlite3.Connection) -> None:
     vocab.add_word(conn, 1, "alpha")
     vocab.add_word(conn, 2, "beta")
-    picked = vocab.select_word(conn, 1, rng=random.Random(0))
-    assert picked["text"] == "alpha"
+    picked = vocab.select_session_words(conn, 1, 1, rng=random.Random(0))
+    assert [r["text"] for r in picked] == ["alpha"]
