@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A Telegram English-tutor bot. Users add vocabulary with `/add`; once a day the bot sends a **cloze-story session** — one short tone-flavoured story in simple learner-level English (CEFR A2–B1) built from the day's FSRS-selected words, with each word replaced by a numbered blank and a shuffled word bank below. The user types the missing word for each blank; every answer applies the FSRS rating (correct → Good, miss → Again). Plain chat messages stream live replies from any OpenAI-compatible chat-completions endpoint with the chat's vocab injected as soft hints.
+A Telegram English-tutor bot. Users add vocabulary with `/add`; once a day the bot sends a **cloze-story session** — one short tone-flavoured story in simple learner-level English (CEFR A2–B1) built from the day's FSRS-selected words, with each word replaced by a numbered blank and a shuffled word bank below. The user types the missing word for each blank; every answer applies the FSRS rating (correct → Good, miss → Again). Plain chat messages get a one-shot reply (typing indicator while composing) from any OpenAI-compatible chat-completions endpoint with the chat's vocab injected as soft hints.
 
 ## Setup
 
@@ -75,7 +75,7 @@ Up to `cloze.MAX_INTRO_WORDS` (2) of each session's words are **introduction see
 Code is split into focused modules (entrypoint is `bot.py`):
 
 - **`bot.py`** — python-telegram-bot wiring. Command/callback/message handlers, scheduler bootstrap, transcript/history management (capped at `MAX_HISTORY_MESSAGES`), DB connection lifecycle, and a central `on_error` handler (logs every escaped exception and sends the chat a one-line ⚠️ instead of dead silence).
-- **`llm.py`** — OpenAI-compatible HTTP client (local server or OpenRouter, selected by `LLM_BACKEND`). `stream_chat()` for live edits, `chat()` one-shot for pushes, `health()` and `usage()` for `/status`. SSE/completion parsing is factored into pure helpers.
+- **`llm.py`** — OpenAI-compatible HTTP client (local server or OpenRouter, selected by `LLM_BACKEND`). `chat()` one-shot (just-talk replies, story composer, drill judge — takes a `timeout` kwarg), `health()` and `usage()` for `/status`. Completion parsing is factored into a pure helper.
 - **`sysinfo.py`** — pure readers for host diagnostics used by `/status` (hardware, OS, load, temp, disk free). Each reader has an injectable dependency and a safe fallback so `/status` works on hosts that don't expose the underlying files.
 - **`vocab.py`** — vocabulary CRUD, literal mention scanning, FSRS rating (`rate_word`), and the weighted-random `select_session_words`. Uses `py-fsrs` with `desired_retention=0.95` and `maximum_interval=7d` so review intervals stay tight.
 - **`prompts.py`** — tone-flavoured push/story templates (simple learner-level English constraints) and the just-talk system-prompt composer that appends the chat's vocab as soft hints.
@@ -142,7 +142,7 @@ Run with the project venv from the repo root. Neither path is imported by
 
 ## Key constants
 
-- `bot.py`: `EDIT_INTERVAL = 2.0` (seconds between stream edits), `MAX_MSG_LEN = 4000` (per-message cap; long responses spill into additional messages), `MAX_HISTORY_MESSAGES = 41` (system + 40 turns; older just-talk turns are dropped).
+- `bot.py`: `MAX_MSG_LEN = 4000` (per-message cap; long responses spill into additional messages), `MAX_HISTORY_MESSAGES = 41` (system + 40 turns; older just-talk turns are dropped).
 - `llm.py`: `LLAMA_URL`, `MODEL = "gemma4"` (model id sent to the local backend; OpenRouter uses `OPENROUTER_MODEL`); `chat()` takes a `timeout` kwarg (default 180 s).
 - `vocab.py`: `FSRS_RETENTION = 0.95`, `FSRS_MAX_DAYS = 7`, `RECENCY_TAU_DAYS = 7.0`, `INTRO_GRADUATION_REPS = 2` (ratings before a word leaves the introduction pool), `REMEMBERED_REVIVAL_FORGET_PROB = 0.3` (forget-prob at which a remembered word re-enters selection).
 - `cloze.py`: `MAX_INTRO_WORDS = 2` (introduction seeds per daily session), `SKIP_TOKENS` (`skip`, `?`).

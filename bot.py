@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""teach-me-eng-bot — streaming chat + FSRS-driven vocab agent.
+"""teach-me-eng-bot — FSRS-driven vocab agent with an LLM chat fallback.
 
 Split responsibilities:
-  * llm.py           — OpenAI-compatible chat client (stream + one-shot + health)
+  * llm.py           — OpenAI-compatible chat client (one-shot + health)
   * vocab.py         — vocabulary CRUD, FSRS rating, weighted selection
   * prompts.py       — tone templates + just-talk system prompt composer
   * config_flow.py   — /start state machine for per-chat settings
@@ -73,8 +73,6 @@ ALLOWED_USER_IDS: set[int] = {
     if x.strip()
 }
 
-CURSOR = "▌"
-EDIT_INTERVAL = 2.0   # seconds between Telegram message edits (rate-limit safe)
 MAX_MSG_LEN = 4000    # Telegram hard limit is 4096; responses past this spill into new messages
 MAX_HISTORY_MESSAGES = 41  # 1 system + 40 turns; older turns are dropped so the LLM context can't grow unbounded
 
@@ -252,18 +250,6 @@ def is_allowed(update: Update) -> bool:
 
 
 # --- telegram send helpers --------------------------------------------------
-
-
-async def safe_edit(message, text: str, *, parse_mode: str | None = None) -> None:
-    """Edit a Telegram message, handling rate-limit and no-change errors."""
-    try:
-        await message.edit_text(text, parse_mode=parse_mode)
-    except RetryAfter as e:
-        await asyncio.sleep(e.retry_after + 0.5)
-        await message.edit_text(text, parse_mode=parse_mode)
-    except BadRequest as e:
-        if "message is not modified" not in str(e).lower():
-            raise
 
 
 async def safe_send(
@@ -1619,48 +1605,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     histories[chat_id] = trim_history(histories[chat_id])
     append_turn(chat_id, "user", user_text)
 
-    current_msg = await update.message.reply_text(CURSOR)
-    current_page = ""
-    accumulated = ""
-    last_edit = asyncio.get_event_loop().time()
-
-    def fmt(s: str) -> str:
-        return vocab.highlight_matches(s, word_texts)
-
+    # One-shot reply (the token-streaming live-edit machinery served a
+    # feature used once in months — a typing indicator + full reply is
+    # simpler and rate-limit-proof).
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     try:
-        async for token in llm.stream_chat(histories[chat_id]):
-            accumulated += token
-            current_page += token
-
-            while len(current_page) > MAX_MSG_LEN:
-                idx = split_point(current_page, MAX_MSG_LEN)
-                head, current_page = current_page[:idx], current_page[idx:]
-                await safe_edit(current_msg, fmt(head), parse_mode="HTML")
-                current_msg = await safe_send(
-                    context.bot, chat_id, fmt(current_page + CURSOR), parse_mode="HTML"
-                )
-                last_edit = asyncio.get_event_loop().time()
-
-            now = asyncio.get_event_loop().time()
-            if now - last_edit >= EDIT_INTERVAL:
-                await safe_edit(current_msg, fmt(current_page + CURSOR), parse_mode="HTML")
-                last_edit = now
-
-    except Exception as e:
-        log.error("Streaming error: %s", e)
+        reply = await llm.chat(
+            histories[chat_id], max_tokens=1024, temperature=0.7
+        )
+    except Exception as e:  # noqa: BLE001 — surface the failure to the user
+        log.error("just-talk chat error: %s", e)
         append_turn(chat_id, "error", f"{type(e).__name__}: {e}")
-        await safe_edit(current_msg, fmt(current_page or f"⚠️ Error: {e}"), parse_mode="HTML")
+        await update.message.reply_text(f"⚠️ Error: {e}")
         return
 
-    final_text = current_page or "⚠️ No response from model."
-    await safe_edit(current_msg, fmt(final_text), parse_mode="HTML")
+    final_text = reply or "⚠️ No response from model."
+    remaining = final_text
+    while remaining:
+        idx = split_point(remaining, MAX_MSG_LEN)
+        head, remaining = remaining[:idx], remaining[idx:]
+        await safe_send(
+            context.bot, chat_id,
+            vocab.highlight_matches(head, word_texts),
+            parse_mode="HTML",
+        )
 
-    histories[chat_id].append({"role": "assistant", "content": accumulated})
-    append_turn(chat_id, "assistant", accumulated)
+    histories[chat_id].append({"role": "assistant", "content": reply})
+    append_turn(chat_id, "assistant", reply)
 
     # Count any vocab words literally present in the reply.
     id_pairs = [(r["id"], r["text"]) for r in vocab_rows]
-    mentioned = vocab.scan_mentions(accumulated, id_pairs)
+    mentioned = vocab.scan_mentions(reply, id_pairs)
     if mentioned:
         vocab.bump_mentions(conn, mentioned)
 

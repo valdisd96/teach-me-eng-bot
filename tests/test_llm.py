@@ -45,31 +45,6 @@ def captured_request(monkeypatch: pytest.MonkeyPatch) -> dict:
     return captured
 
 
-def test_sse_delta_extracts_content() -> None:
-    line = 'data: {"choices":[{"delta":{"content":"hello"}}]}'
-    assert llm._parse_sse_delta(line) == "hello"
-
-
-def test_sse_delta_returns_none_on_done() -> None:
-    assert llm._parse_sse_delta("data: [DONE]") is None
-
-
-def test_sse_delta_returns_none_on_non_data_line() -> None:
-    assert llm._parse_sse_delta("event: ping") is None
-    assert llm._parse_sse_delta("") is None
-
-
-def test_sse_delta_tolerates_empty_delta() -> None:
-    # Some llama.cpp builds emit {"delta":{}} for the opening chunk.
-    line = 'data: {"choices":[{"delta":{}}]}'
-    assert llm._parse_sse_delta(line) is None
-
-
-def test_sse_delta_tolerates_junk_payload() -> None:
-    assert llm._parse_sse_delta("data: not-json") is None
-    assert llm._parse_sse_delta('data: {"choices":[]}') is None
-
-
 def test_parse_completion_returns_content() -> None:
     payload = {"choices": [{"message": {"content": "paragraph here"}}]}
     assert llm._parse_completion(payload) == "paragraph here"
@@ -296,70 +271,6 @@ def test_chat_default_timeout_is_180(
         f"chat() default must construct AsyncClient with timeout=180; "
         f"got {captured.get('timeout')!r}"
     )
-
-
-# stream_chat() request shape -------------------------------------------
-
-
-def _patch_stream(monkeypatch: pytest.MonkeyPatch, sse_body: bytes) -> dict:
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["headers"] = dict(request.headers)
-        captured["body"] = json.loads(request.content) if request.content else {}
-        return httpx.Response(
-            200,
-            content=sse_body,
-            headers={"content-type": "text/event-stream"},
-        )
-
-    transport = httpx.MockTransport(handler)
-    real = httpx.AsyncClient
-
-    def factory(*args, **kwargs):
-        kwargs["transport"] = transport
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", factory)
-    return captured
-
-
-def _collect_stream(messages: list[dict]) -> list[str]:
-    async def run() -> list[str]:
-        return [d async for d in llm.stream_chat(messages)]
-
-    return asyncio.run(run())
-
-
-def test_stream_chat_default_targets_llama(
-    clean_env: pytest.MonkeyPatch,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sse = (
-        b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
-        b"data: [DONE]\n\n"
-    )
-    captured = _patch_stream(monkeypatch, sse)
-    deltas = _collect_stream([{"role": "user", "content": "hi"}])
-    assert deltas == ["hi"]
-    assert captured["url"] == llm.LLAMA_URL
-    assert "authorization" not in captured["headers"]
-    assert captured["body"]["stream"] is True
-
-
-def test_stream_chat_openrouter_carries_bearer(
-    clean_env: pytest.MonkeyPatch,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clean_env.setenv("LLM_BACKEND", "openrouter")
-    clean_env.setenv("OPENROUTER_API_KEY", "k")
-    sse = b'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n'
-    captured = _patch_stream(monkeypatch, sse)
-    deltas = _collect_stream([{"role": "user", "content": "hi"}])
-    assert deltas == ["x"]
-    assert captured["url"] == llm.OPENROUTER_URL
-    assert captured["headers"]["authorization"] == "Bearer k"
 
 
 # health() --------------------------------------------------------------

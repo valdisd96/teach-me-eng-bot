@@ -2,7 +2,7 @@
 
 A Telegram bot that helps you learn English vocabulary.
 
-You save words with `/add`. The bot sends short tone-flavoured push messages that use those words, and `✅ / ❌` buttons update an FSRS spaced-repetition schedule per word. Plain (non-slash) messages stream a chat reply from an LLM with your vocab injected as soft hints.
+You save words with `/add`. Once a day the bot sends a short tone-flavoured cloze story built from your words — you type the missing word for each blank, and every answer updates an FSRS spaced-repetition schedule per word. Plain (non-slash) messages get a chat reply from an LLM with your vocab injected as soft hints.
 
 A [python-telegram-bot](https://python-telegram-bot.org) app talking to any OpenAI-compatible chat-completions endpoint. Per-chat vocabulary, settings, and FSRS state live in SQLite (`data/vocab.db`); APScheduler sends randomised pushes inside each chat's active window.
 

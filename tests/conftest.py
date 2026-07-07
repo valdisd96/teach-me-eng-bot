@@ -41,6 +41,8 @@ def _clear_bot_state():
         "pending_game_filters",
         "sessions",
         "import_pending",
+        "histories",
+        "conv_paths",
     ):
         getattr(mod, name).clear()
     mod.deferred_sessions.clear()
