@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS push_log (
     tg_message_id  INTEGER,
     word_ids_json  TEXT    NOT NULL,
     rated          INTEGER NOT NULL DEFAULT 0,
+    session_json   TEXT,
     FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_push_log_chat ON push_log(chat_id);
@@ -123,3 +124,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             "ALTER TABLE words ADD COLUMN "
             "repeat_correct_streak INTEGER NOT NULL DEFAULT 0"
         )
+    if "session_json" not in _column_names(conn, "push_log"):
+        # Serialized in-flight cloze session (see cloze.session_to_json) so a
+        # restart can rehydrate the day's story instead of stranding it.
+        conn.execute("ALTER TABLE push_log ADD COLUMN session_json TEXT")

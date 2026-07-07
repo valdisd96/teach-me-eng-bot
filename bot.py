@@ -143,6 +143,9 @@ cloze_sessions: dict[int, cloze_module.Session] = {}
 # and the direction-picker tap, as `(mode, names)` so OR-mode focus survives the
 # round-trip. Missing entry means "no filter". Latest write wins; popped on game start.
 pending_game_filters: dict[int, tuple[Literal["all", "any"], list[str]]] = {}
+# Chats whose daily session dispatch found a typed game in flight; fired as
+# soon as that game completes or is cancelled (see _fire_deferred_session).
+deferred_sessions: set[int] = set()
 
 GAMES_NEED_VOCAB = "add at least 4 words to your vocab first"
 GAMES_IN_PROGRESS = "you have a game in progress"
@@ -167,6 +170,38 @@ FOCUS_DRILL_NOT_ENOUGH = (
     f"(need at least {focus_drill_module.MIN_ROUNDS})"
 )
 FOCUS_DRILL_PROMPT_HINT = "Type the translation."
+STORY_IN_PROGRESS = (
+    "you have an unfinished daily story — answer its blanks first, "
+    "or /games cancel to abandon it"
+)
+
+
+def _in_progress_reply(chat_id: int) -> str | None:
+    """The in-progress message for the chat's active game/session, or None.
+
+    Single source of truth for every "is something already running?" gate —
+    covers ALL five state maps so a new activity can't slip past (the cloze
+    session was originally missing from the hand-rolled per-handler chains).
+    """
+    for store, reply in (
+        (games, GAMES_IN_PROGRESS),
+        (irregulars, IRREGULARS_IN_PROGRESS),
+        (repeat_games, REPEAT_IN_PROGRESS),
+        (focus_drills, FOCUS_DRILL_IN_PROGRESS),
+        (cloze_sessions, STORY_IN_PROGRESS),
+    ):
+        if chat_id in store:
+            return reply
+    return None
+
+
+def _typed_game_active(chat_id: int) -> bool:
+    """True while a game that consumes plain-text answers is in flight."""
+    return (
+        chat_id in irregulars
+        or chat_id in repeat_games
+        or chat_id in focus_drills
+    )
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -284,6 +319,12 @@ async def _push_llm_chat(messages: list[dict]) -> str:
 async def dispatch_push(chat_id: int) -> None:
     """Compose the daily cloze-story session and send its opening message."""
     assert conn is not None and app is not None
+    if _typed_game_active(chat_id):
+        # A typed game owns plain-text answers right now — installing the
+        # session would hijack them mid-round. Fire when the game ends.
+        deferred_sessions.add(chat_id)
+        log.info("Session for chat %s deferred until the typed game ends", chat_id)
+        return
     settings = config_flow.load_settings(conn, chat_id)
     if settings is None:
         log.info("No session for chat %s (chat unconfigured)", chat_id)
@@ -328,6 +369,9 @@ async def dispatch_push(chat_id: int) -> None:
             (msg.message_id, push_id),
         )
         cloze_sessions[chat_id] = session
+        sched_module.save_session_json(
+            conn, push_id, cloze_module.session_to_json(session)
+        )
         append_turn(
             chat_id,
             "push",
@@ -335,6 +379,16 @@ async def dispatch_push(chat_id: int) -> None:
         )
     except Exception as e:  # noqa: BLE001
         log.error("Failed to send session to chat %s: %s", chat_id, e)
+        # Drop the phantom row — leaving it would make sent_today() treat the
+        # failed send as delivered and suppress any replan for the day.
+        sched_module.delete_push(conn, push_id)
+
+
+async def _fire_deferred_session(chat_id: int) -> None:
+    """Dispatch a session that was deferred because a typed game was running."""
+    if chat_id in deferred_sessions and not _typed_game_active(chat_id):
+        deferred_sessions.discard(chat_id)
+        await dispatch_push(chat_id)
 
 
 # --- command handlers -------------------------------------------------------
@@ -370,10 +424,10 @@ HELP_TEXT = (
     "/import (and grab a backup any time with /export). Once a day, inside "
     "your window, the bot sends a short story with your words replaced by "
     "numbered blanks (plus a word bank).\n"
-    "3. Type the missing word for each blank — every answer rates the word "
-    "via FSRS spaced repetition, so tougher words come back more often. At "
-    "the end you get the full story, your score, and translations of what "
-    "you missed.\n"
+    "3. Type the missing word for each blank (or `skip` to give up on one) — "
+    "every answer rates the word via FSRS spaced repetition, so tougher "
+    "words come back more often. At the end you get the full story, your "
+    "score, and translations of what you missed.\n"
     "4. Optional: tag words with /label (e.g. `/label horse pos:noun "
     "type:animal`) and slice the deck with /list, /games, or /focus.\n\n"
     "Plain (non-slash) messages chat with the model and will naturally reuse "
@@ -1038,34 +1092,25 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # /games cancel — must run BEFORE the in-progress short-circuit, otherwise
     # GAMES_IN_PROGRESS would fire and the user could never cancel.
     if len(spec_args) == 1 and spec_args[0].strip().lower() == "cancel":
-        had_game = (
-            chat_id in games
-            or chat_id in irregulars
-            or chat_id in repeat_games
-            or chat_id in focus_drills
-            or chat_id in cloze_sessions
-        )
+        had_game = _in_progress_reply(chat_id) is not None
         games.pop(chat_id, None)
         irregulars.pop(chat_id, None)
         repeat_games.pop(chat_id, None)
         focus_drills.pop(chat_id, None)
-        cloze_sessions.pop(chat_id, None)
+        cz = cloze_sessions.pop(chat_id, None)
+        if cz is not None and cz.push_id is not None:
+            # Close the push_log row so a restart doesn't resurrect the
+            # cancelled story via session rehydration.
+            sched_module.mark_rated(conn, cz.push_id)
         pending_game_filters.pop(chat_id, None)
         await update.message.reply_text(
             GAMES_CANCELLED if had_game else GAMES_NOTHING_TO_CANCEL
         )
+        await _fire_deferred_session(chat_id)
         return
-    if chat_id in games:
-        await update.message.reply_text(GAMES_IN_PROGRESS)
-        return
-    if chat_id in irregulars:
-        await update.message.reply_text(IRREGULARS_IN_PROGRESS)
-        return
-    if chat_id in repeat_games:
-        await update.message.reply_text(REPEAT_IN_PROGRESS)
-        return
-    if chat_id in focus_drills:
-        await update.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
+    in_progress = _in_progress_reply(chat_id)
+    if in_progress:
+        await update.message.reply_text(in_progress)
         return
     if spec_args:
         try:
@@ -1288,37 +1333,17 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
+    in_progress = _in_progress_reply(chat_id)
+    if in_progress:
+        await query.message.reply_text(in_progress)
+        return
     if query.data == "gm:irr":
-        if chat_id in games:
-            await query.message.reply_text(GAMES_IN_PROGRESS)
-            return
-        if chat_id in irregulars:
-            await query.message.reply_text(IRREGULARS_IN_PROGRESS)
-            return
-        if chat_id in repeat_games:
-            await query.message.reply_text(REPEAT_IN_PROGRESS)
-            return
-        if chat_id in focus_drills:
-            await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
-            return
         rounds = irregular_module.draw_rounds(rng=random.Random())
         game = irregular_module.Game(chat_id=chat_id, rounds=rounds)
         irregulars[chat_id] = game
         await query.message.reply_text(_format_irregular_prompt(game))
         return
     if query.data == "gm:repeat":
-        if chat_id in games:
-            await query.message.reply_text(GAMES_IN_PROGRESS)
-            return
-        if chat_id in irregulars:
-            await query.message.reply_text(IRREGULARS_IN_PROGRESS)
-            return
-        if chat_id in repeat_games:
-            await query.message.reply_text(REPEAT_IN_PROGRESS)
-            return
-        if chat_id in focus_drills:
-            await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
-            return
         remembered_ids = vocab.remembered_word_ids(conn, chat_id)
         mastered_ids = vocab.mastered_word_ids(conn, chat_id)
         all_rows = vocab.list_words(conn, chat_id)
@@ -1336,18 +1361,6 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _send_repeat_round(context.bot, chat_id, game)
         return
     if query.data == "gm:focus":
-        if chat_id in games:
-            await query.message.reply_text(GAMES_IN_PROGRESS)
-            return
-        if chat_id in irregulars:
-            await query.message.reply_text(IRREGULARS_IN_PROGRESS)
-            return
-        if chat_id in repeat_games:
-            await query.message.reply_text(REPEAT_IN_PROGRESS)
-            return
-        if chat_id in focus_drills:
-            await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
-            return
         focus_text = vocab.get_focus_spec(conn, chat_id)
         mode, names_list = vocab.split_focus_spec(focus_text)
         names = names_list or None
@@ -1367,18 +1380,6 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         direction = "tw"
     else:
         log.warning("Malformed gm callback: %r", query.data)
-        return
-    if chat_id in games:
-        await query.message.reply_text(GAMES_IN_PROGRESS)
-        return
-    if chat_id in irregulars:
-        await query.message.reply_text(IRREGULARS_IN_PROGRESS)
-        return
-    if chat_id in repeat_games:
-        await query.message.reply_text(REPEAT_IN_PROGRESS)
-        return
-    if chat_id in focus_drills:
-        await query.message.reply_text(FOCUS_DRILL_IN_PROGRESS)
         return
     stash = pending_game_filters.get(chat_id)
     if stash:
@@ -1412,8 +1413,9 @@ async def on_play_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    if chat_id in games:
-        await query.message.reply_text(GAMES_IN_PROGRESS)
+    in_progress = _in_progress_reply(chat_id)
+    if in_progress:
+        await query.message.reply_text(in_progress)
         return
     focus_text = vocab.get_focus_spec(conn, chat_id)
     mode, names_list = vocab.split_focus_spec(focus_text)
@@ -1524,8 +1526,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # rating the old ✅/❌ push buttons used to (correct → Good, miss → Again).
     cz = cloze_sessions.get(chat_id)
     if cz is not None and not cz.done:
+        kind = cloze_module.classify_answer(user_text, cz)
+        if kind == "other":
+            # Not a word-bank word and not a skip — grading it would rate an
+            # unrelated word `Again` off a stray chat message. Nudge instead.
+            await update.message.reply_text(
+                cloze_module.format_not_answer_hint(cz)
+            )
+            return
         blank = cz.current()
-        correct = cloze_module.grade_answer(user_text, blank.word)
+        correct = kind == "answer" and cloze_module.grade_answer(
+            user_text, blank.word
+        )
         try:
             vocab.rate_word(
                 conn, blank.word_id, Rating.Good if correct else Rating.Again
@@ -1536,6 +1548,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except KeyError:
             log.warning("cloze answer: unknown word_id %s", blank.word_id)
         cloze_module.apply_answer(cz, correct)
+        if cz.push_id is not None:
+            sched_module.save_session_json(
+                conn, cz.push_id, cloze_module.session_to_json(cz)
+            )
         await update.message.reply_text(
             cloze_module.format_answer_feedback(correct, blank.word)
         )
@@ -1579,6 +1595,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 irregular_module.format_result(irr_game.score, irr_game.n_rounds)
             )
             irregulars.pop(chat_id, None)
+            await _fire_deferred_session(chat_id)
         else:
             await update.message.reply_text(_format_irregular_prompt(irr_game))
         return
@@ -1611,6 +1628,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             )
             repeat_games.pop(chat_id, None)
+            await _fire_deferred_session(chat_id)
         else:
             await update.message.reply_text(_format_repeat_prompt(rep_game))
         return
@@ -1643,6 +1661,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             )
             focus_drills.pop(chat_id, None)
+            await _fire_deferred_session(chat_id)
         else:
             await update.message.reply_text(_format_focus_drill_prompt(fd_game))
         return
@@ -1725,6 +1744,22 @@ async def _post_init(application: Application) -> None:
     runner.start()
     runner.refresh_all()
     log.info("Scheduler started; refreshed jobs for all known chats.")
+    # Rehydrate any daily session that was in flight when the bot restarted —
+    # without this, deploys strand the day's story (typed answers would fall
+    # through to just-talk and the blanks could never be answered).
+    for row in conn.execute("SELECT chat_id, tz FROM chats").fetchall():
+        payload = sched_module.load_unfinished_session_json(
+            conn, row["chat_id"], row["tz"]
+        )
+        if payload is None:
+            continue
+        try:
+            cloze_sessions[row["chat_id"]] = cloze_module.session_from_json(payload)
+            log.info("Rehydrated in-flight session for chat %s", row["chat_id"])
+        except (ValueError, TypeError, KeyError) as e:
+            log.warning(
+                "Could not rehydrate session for chat %s: %s", row["chat_id"], e
+            )
     # One-shot translation backfill for rows added before the column existed
     # (or whose previous translate attempt failed). Network-bound, so offload.
     counts = await asyncio.to_thread(

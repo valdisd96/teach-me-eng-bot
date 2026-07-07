@@ -95,6 +95,69 @@ def plan_push_times(
     return times
 
 
+def plan_session_time(
+    date: datetime.date,
+    tz: str,
+    active_start: str,
+    active_end: str,
+    *,
+    now: datetime.datetime | None = None,
+    rng: random.Random | None = None,
+) -> datetime.datetime | None:
+    """One uniform-random minute inside the active window, strictly after `now`.
+
+    Unlike the fixed roll in `plan_push_times`, a mid-window `now` (bot
+    restarted after the original slot passed) samples the *remaining* window
+    instead of dropping the day. Returns None when the window has already
+    closed (or is empty).
+    """
+    zone = ZoneInfo(tz)
+    sh, sm = _parse_hm(active_start)
+    eh, em = _parse_hm(active_end)
+    start = datetime.datetime.combine(date, datetime.time(sh, sm), tzinfo=zone)
+    end = datetime.datetime.combine(date, datetime.time(eh, em), tzinfo=zone)
+    if (eh, em) == (0, 0):
+        end += datetime.timedelta(days=1)
+    now = now or datetime.datetime.now(zone)
+    # Leave a one-minute floor so the job never lands in the past by the time
+    # APScheduler registers it.
+    lo = max(start, now + datetime.timedelta(minutes=1))
+    window_min = int((end - lo).total_seconds() // 60)
+    if window_min <= 0:
+        return None
+    off = (rng or random).randint(0, window_min - 1)
+    return lo + datetime.timedelta(minutes=off)
+
+
+_SENT_AT_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def sent_today(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    tz: str,
+    *,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """True if the chat's latest push_log row falls on today's *local* date.
+
+    Guards replanning after a restart: without it every service restart
+    re-rolls the daily session and can send a second story the same day.
+    """
+    row = conn.execute(
+        "SELECT sent_at FROM push_log WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    zone = ZoneInfo(tz)
+    sent = datetime.datetime.strptime(row["sent_at"], _SENT_AT_FMT).replace(
+        tzinfo=datetime.timezone.utc
+    )
+    now = now or datetime.datetime.now(zone)
+    return sent.astimezone(zone).date() == now.date()
+
+
 # Injected type aliases for clarity.
 LlmChat = Callable[[list[dict]], Awaitable[str]]
 TranslateFn = Callable[[str, str], Awaitable[str]]
@@ -258,6 +321,55 @@ def mark_rated(conn: sqlite3.Connection, push_id: int) -> None:
     conn.execute("UPDATE push_log SET rated = 1 WHERE id = ?", (push_id,))
 
 
+def delete_push(conn: sqlite3.Connection, push_id: int) -> None:
+    """Drop a push_log row whose Telegram send failed.
+
+    Leaving the phantom row would make `sent_today` suppress a replan, so a
+    single failed send would silently cost the chat its whole day.
+    """
+    conn.execute("DELETE FROM push_log WHERE id = ?", (push_id,))
+
+
+def save_session_json(
+    conn: sqlite3.Connection, push_id: int, session_json: str
+) -> None:
+    """Persist the in-flight cloze session (called after send + every answer)."""
+    conn.execute(
+        "UPDATE push_log SET session_json = ? WHERE id = ?",
+        (session_json, push_id),
+    )
+
+
+def load_unfinished_session_json(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    tz: str,
+    *,
+    now: datetime.datetime | None = None,
+) -> str | None:
+    """session_json of today's still-unrated session, or None.
+
+    Yesterday's leftovers are ignored — the answers would rate against a
+    stale word selection, and today's dispatch replaces the session anyway.
+    """
+    row = conn.execute(
+        "SELECT sent_at, session_json FROM push_log "
+        "WHERE chat_id = ? AND rated = 0 AND session_json IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    zone = ZoneInfo(tz)
+    sent = datetime.datetime.strptime(row["sent_at"], _SENT_AT_FMT).replace(
+        tzinfo=datetime.timezone.utc
+    )
+    now = now or datetime.datetime.now(zone)
+    if sent.astimezone(zone).date() != now.date():
+        return None
+    return row["session_json"]
+
+
 def load_push(
     conn: sqlite3.Connection, push_id: int
 ) -> sqlite3.Row | None:
@@ -328,33 +440,34 @@ class PushRunner:
         zone = ZoneInfo(settings.tz)
         now = datetime.datetime.now(zone)
         # One daily cloze-story session; words_per_day sizes the story, not
-        # the schedule.
-        times = plan_push_times(
+        # the schedule. Restart-safe: skip if today's session already went
+        # out, otherwise sample the remaining window (not the full day).
+        if sent_today(self.conn, chat_id, settings.tz, now=now):
+            log.info("Session already sent today for chat %s; not replanning", chat_id)
+            return []
+        t = plan_session_time(
             now.date(),
             settings.tz,
-            1,
             settings.active_start,
             settings.active_end,
+            now=now,
         )
-        scheduled: list[datetime.datetime] = []
-        for i, t in enumerate(times):
-            if t <= now:
-                continue
-            self.scheduler.add_job(
-                self.dispatch,
-                DateTrigger(run_date=t),
-                args=[chat_id],
-                id=f"push:{chat_id}:{i}",
-                replace_existing=True,
-            )
-            scheduled.append(t)
+        if t is None:
+            log.info("Active window already over for chat %s today", chat_id)
+            return []
+        self.scheduler.add_job(
+            self.dispatch,
+            DateTrigger(run_date=t),
+            args=[chat_id],
+            id=f"push:{chat_id}:0",
+            replace_existing=True,
+        )
         log.info(
-            "Planned %d session(s) for chat %s today: %s",
-            len(scheduled),
+            "Planned session for chat %s today: %s",
             chat_id,
-            [t.isoformat(timespec="minutes") for t in scheduled],
+            t.isoformat(timespec="minutes"),
         )
-        return scheduled
+        return [t]
 
     def _remove_chat_jobs(self, chat_id: int) -> None:
         for j in list(self.scheduler.get_jobs()):

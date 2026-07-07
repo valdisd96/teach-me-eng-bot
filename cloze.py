@@ -5,16 +5,19 @@ are replaced by numbered blanks; the user fills them one by one and each
 answer feeds FSRS. This module owns the blanking, grading, session state,
 and message formatting — no telegram imports, no DB writes, no LLM calls;
 `scheduler.compose_session` builds sessions and `bot.py` wires delivery and
-plain-text answer routing. State is per-chat and held only in process
-memory; a bot restart silently abandons an in-flight session.
+plain-text answer routing. The live copy is per-chat in process memory;
+`session_to_json`/`session_from_json` let bot.py persist it in
+`push_log.session_json` so a restart rehydrates the day's story.
 """
 
 from __future__ import annotations
 
 import html
+import json
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from typing import Literal
 
 # At most this many introduction-phase words (reps < INTRO_GRADUATION_REPS)
 # are seeded into each daily session, bypassing /focus — the session-based
@@ -119,6 +122,48 @@ def grade_answer(user_text: str, expected: str) -> bool:
     return _normalize_answer(user_text) == _normalize_answer(expected)
 
 
+# Typing any of these gives up on the current blank (graded as a miss).
+SKIP_TOKENS = frozenset({"skip", "?"})
+
+
+def classify_answer(
+    user_text: str, session: Session
+) -> Literal["answer", "skip", "other"]:
+    """Decide whether plain text during a session is meant as an answer.
+
+    Only word-bank entries (any blank's word, same normalization as
+    `grade_answer`) and the explicit skip tokens count — anything else is
+    "other" and must NOT be graded, so a stray chat message can't rate a
+    word `Again` by accident.
+    """
+    norm = _normalize_answer(user_text)
+    if norm in SKIP_TOKENS:
+        return "skip"
+    if any(_normalize_answer(b.word) == norm for b in session.blanks):
+        return "answer"
+    return "other"
+
+
+def format_not_answer_hint(session: Session) -> str:
+    """Reply for plain text that doesn't match the word bank or a skip token."""
+    return (
+        f"📖 Daily story in progress — type the word-bank word for blank "
+        f"({session.current_blank + 1}), `skip` to give up on it, "
+        f"or /games cancel to abandon the story."
+    )
+
+
+def session_to_json(session: Session) -> str:
+    """Serialize for push_log.session_json. Inverse of `session_from_json`."""
+    return json.dumps(asdict(session), ensure_ascii=False)
+
+
+def session_from_json(text: str) -> Session:
+    data = json.loads(text)
+    blanks = [Blank(**b) for b in data.pop("blanks")]
+    return Session(blanks=blanks, **data)
+
+
 def apply_answer(session: Session, correct: bool) -> None:
     """Record the current blank's outcome and advance to the next one."""
     blank = session.current()
@@ -156,7 +201,7 @@ def format_session_message(
 def format_blank_prompt(session: Session) -> str:
     return (
         f"✍️ Type the word for blank ({session.current_blank + 1}) "
-        f"of {session.n_blanks}."
+        f"of {session.n_blanks} (or `skip`)."
     )
 
 
