@@ -156,17 +156,13 @@ IRREGULARS_IN_PROGRESS = "you have an irregular-verbs game in progress"
 IRREGULARS_PROMPT_HINT = (
     'Reply with the past simple and past participle, e.g. "went / gone".'
 )
-REPEAT_IN_PROGRESS = "you have a repeat game in progress"
-REPEAT_NOT_ENOUGH = (
-    f"not enough remembered words yet — keep practising "
-    f"(need at least {typed_drill.REPEAT_ROUNDS})"
-)
-FOCUS_DRILL_IN_PROGRESS = "you have a focus drill in progress"
-FOCUS_DRILL_NOT_ENOUGH = (
-    f"not enough focus words yet — add more or widen /focus "
+DRILL_IN_PROGRESS = "you have a typed drill in progress"
+DRILL_NOT_ENOUGH = (
+    f"not enough words yet — add more or widen /focus "
     f"(need at least {typed_drill.MIN_ROUNDS})"
 )
 DRILL_PROMPT_HINT = "Type the translation."
+GAMES_MENU_OUTDATED = "that game menu is outdated — send /games again"
 STORY_IN_PROGRESS = (
     "you have an unfinished daily story — answer its blanks first, "
     "or /games cancel to abandon it"
@@ -180,15 +176,10 @@ def _in_progress_reply(chat_id: int) -> str | None:
     covers ALL state maps so a new activity can't slip past (the cloze
     session was originally missing from the hand-rolled per-handler chains).
     """
-    drill = typed_drills.get(chat_id)
-    if drill is not None:
-        return (
-            REPEAT_IN_PROGRESS if drill.kind == "repeat"
-            else FOCUS_DRILL_IN_PROGRESS
-        )
     for store, reply in (
         (games, GAMES_IN_PROGRESS),
         (irregulars, IRREGULARS_IN_PROGRESS),
+        (typed_drills, DRILL_IN_PROGRESS),
         (cloze_sessions, STORY_IN_PROGRESS),
     ):
         if chat_id in store:
@@ -410,7 +401,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("tr", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Pick a game: Word->Translation / Translation->Word (vocab quiz, optional label filter), Irregular verbs, Repeat typed (remembered words), or Focus drill typed (in-progress /focus words). /games cancel ends an in-flight game or daily story session."),
+    ("games", "Pick a game: Word->Translation / Translation->Word (vocab quiz, optional label filter), Irregular verbs, or Typed drill (/focus words + remembered mastery checks). /games cancel ends an in-flight game or story."),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -1135,10 +1126,9 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         pending_game_filters.pop(chat_id, None)
         rows = [
-            [InlineKeyboardButton("Irregular verbs", callback_data="gm:irr")],
             [
-                InlineKeyboardButton("Repeat (typed)", callback_data="gm:repeat"),
-                InlineKeyboardButton("Focus drill (typed)", callback_data="gm:focus"),
+                InlineKeyboardButton("Irregular verbs", callback_data="gm:irr"),
+                InlineKeyboardButton("Typed drill", callback_data="gm:drill"),
             ],
         ]
         # Vocab buttons only when there's enough translatable vocab to play —
@@ -1300,38 +1290,25 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         irregulars[chat_id] = game
         await query.message.reply_text(_format_irregular_prompt(game))
         return
-    if query.data == "gm:repeat":
+    if query.data == "gm:drill":
+        focus_text = vocab.get_focus_spec(conn, chat_id)
+        mode, names_list = vocab.split_focus_spec(focus_text)
+        names = names_list or None
+        focus_pool = _playable_rows(conn, chat_id, names, mode=mode)
         remembered_ids = vocab.remembered_word_ids(conn, chat_id)
         mastered_ids = vocab.mastered_word_ids(conn, chat_id)
-        all_rows = vocab.list_words(conn, chat_id)
-        pool = [
-            r for r in all_rows
+        salt_pool = [
+            r for r in vocab.list_words(conn, chat_id)
             if r["id"] in remembered_ids and r["id"] not in mastered_ids
         ]
         try:
             rounds = typed_drill.draw_rounds(
-                pool, n_max=typed_drill.REPEAT_ROUNDS, rng=random.Random()
+                focus_pool, salt_pool, rng=random.Random()
             )
         except ValueError:
-            await query.message.reply_text(REPEAT_NOT_ENOUGH)
+            await query.message.reply_text(DRILL_NOT_ENOUGH)
             return
-        game = typed_drill.Game(chat_id=chat_id, rounds=rounds, kind="repeat")
-        typed_drills[chat_id] = game
-        await _send_drill_round(context.bot, chat_id, game)
-        return
-    if query.data == "gm:focus":
-        focus_text = vocab.get_focus_spec(conn, chat_id)
-        mode, names_list = vocab.split_focus_spec(focus_text)
-        names = names_list or None
-        pool = _playable_rows(conn, chat_id, names, mode=mode)
-        try:
-            rounds = typed_drill.draw_rounds(
-                pool, n_max=typed_drill.MAX_FOCUS_ROUNDS, rng=random.Random()
-            )
-        except ValueError:
-            await query.message.reply_text(FOCUS_DRILL_NOT_ENOUGH)
-            return
-        game = typed_drill.Game(chat_id=chat_id, rounds=rounds, kind="focus")
+        game = typed_drill.Game(chat_id=chat_id, rounds=rounds)
         typed_drills[chat_id] = game
         await _send_drill_round(context.bot, chat_id, game)
         return
@@ -1340,7 +1317,10 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif query.data == "gm:tw":
         direction = "tw"
     else:
-        log.warning("Malformed gm callback: %r", query.data)
+        # Includes gm:repeat / gm:focus buttons on menus sent before the
+        # single Typed-drill button replaced them.
+        log.warning("Outdated/malformed gm callback: %r", query.data)
+        await query.message.reply_text(GAMES_MENU_OUTDATED)
         return
     stash = pending_game_filters.get(chat_id)
     if stash:
@@ -1543,17 +1523,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(_format_irregular_prompt(irr_game))
         return
 
-    # Branch 2b: typed drill (Repeat or Focus drill) in progress — interpret
-    # plain text as the round answer. Repeat grades via the tolerant LLM
-    # judge and records source="repeat" (gates the forget-flip: a wrong
-    # answer drops `remembered` and attaches `focus:hard`); Focus drill
-    # grades strictly and records source="game" (no forget-flip — its words
-    # are non-remembered by construction).
+    # Branch 2b: typed drill in progress — interpret plain text as the round
+    # answer. Salted remembered rounds (rd.judged) grade via the tolerant
+    # LLM judge and record source="repeat" (gates the forget-flip: a wrong
+    # answer drops `remembered` and attaches `focus:hard`); regular focus
+    # rounds grade strictly and record source="game" (no forget-flip —
+    # those words are non-remembered by construction).
     drill = typed_drills.get(chat_id)
     if drill is not None and not drill.done:
         rd = drill.current()
         judged = True
-        if drill.kind == "repeat":
+        if rd.judged:
             verdict = await typed_drill.grade_answer_llm(user_text, rd)
             # None = judge unavailable: score as strict-wrong, but record with
             # source="game" so the miss can't demote a remembered word.
@@ -1570,7 +1550,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             vocab.record_outcome(
                 conn, rd.word_id, correct=correct, weight=0.5,
-                source="repeat" if drill.kind == "repeat" and judged else "game",
+                source="repeat" if rd.judged and judged else "game",
             )
         except KeyError:
             log.warning("record_outcome: unknown word_id %s", rd.word_id)
