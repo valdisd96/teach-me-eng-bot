@@ -21,12 +21,14 @@ Update/Context mocked at the architectural seam, `bot.conn` patched.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
 import random
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fsrs import Rating
 
 os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
 
@@ -390,9 +392,9 @@ def test_record_outcome_wrong_does_not_attach(
     assert streak == 0.0, f"AC6 — wrong outcome must reset streak to 0; got {streak}"
 
 
-def test_record_outcome_wrong_on_already_labelled_does_not_detach(
+def test_record_outcome_wrong_push_detaches_remembered(
     conn: sqlite3.Connection,
-) -> None:  # AC6 — out-of-scope guard: wrong outcome leaves existing label intact
+) -> None:  # a push miss on a remembered word forget-flips it (same as repeat)
     word_id = _add_word(conn)
     # Auto-attach via three pushes first.
     for _ in range(3):
@@ -403,9 +405,29 @@ def test_record_outcome_wrong_on_already_labelled_does_not_detach(
 
     vocab.record_outcome(conn, word_id, correct=False, weight=1.0, source="push")
 
+    labels = vocab.labels_for_word(conn, word_id)
+    assert vocab.REMEMBERED_LABEL not in labels, (
+        f"a wrong push outcome on a remembered word must forget-flip it; "
+        f"got {labels!r}"
+    )
+    assert vocab.FOCUS_HARD_LABEL in labels
+
+
+def test_record_outcome_wrong_game_does_not_detach(
+    conn: sqlite3.Connection,
+) -> None:  # game misses never touch the labels (unchanged behavior)
+    word_id = _add_word(conn)
+    for _ in range(3):
+        vocab.record_outcome(
+            conn, word_id, correct=True, weight=1.0, source="push"
+        )
+    assert vocab.REMEMBERED_LABEL in vocab.labels_for_word(conn, word_id)
+
+    vocab.record_outcome(conn, word_id, correct=False, weight=0.5, source="game")
+
     assert vocab.REMEMBERED_LABEL in vocab.labels_for_word(conn, word_id), (
-        f"AC6 — detach-on-reset is out of scope; existing `remembered` row must "
-        f"survive a wrong outcome; got {vocab.labels_for_word(conn, word_id)!r}"
+        f"a wrong game outcome must NOT detach `remembered`; "
+        f"got {vocab.labels_for_word(conn, word_id)!r}"
     )
 
 
@@ -636,6 +658,74 @@ def test_select_word_returns_none_when_all_remembered(
     assert picked == [], (
         f"AC10 — every word remembered → effective pool is empty → must return "
         f"an empty list; got {picked!r}"
+    )
+
+
+# === revival — decayed remembered words re-enter session selection ==========
+#
+# Graduation must pause reviews, not end them: a `remembered` word whose FSRS
+# forgetting probability has climbed back to REMEMBERED_REVIVAL_FORGET_PROB
+# (0.3) is re-admitted by `_sample_weighted_many` / `select_session_words`.
+# Revival needs FSRS evidence — stability NULL (never rated) stays excluded.
+
+
+_UTC = datetime.timezone.utc
+_NOW = datetime.datetime(2026, 7, 1, 12, 0, tzinfo=_UTC)
+
+
+def test_select_word_revives_remembered_with_stale_fsrs_state(
+    conn: sqlite3.Connection,
+) -> None:  # forget-prob past the threshold → remembered word IS returned
+    wid = _add_word(conn, "alpha")
+    # One Good rating far in the past → stability is set but retention has
+    # decayed well past the revival threshold by _NOW.
+    vocab.rate_word(conn, wid, Rating.Good, at=_NOW - datetime.timedelta(days=90))
+    row = conn.execute("SELECT * FROM words WHERE id = ?", (wid,)).fetchone()
+    assert vocab._forget_prob(row, _NOW) >= vocab.REMEMBERED_REVIVAL_FORGET_PROB, (
+        "fixture precondition: 90 days after a single Good rating the forget "
+        "probability must sit at/above REMEMBERED_REVIVAL_FORGET_PROB"
+    )
+    _mark_remembered(conn, "alpha")
+
+    picked = vocab.select_session_words(conn, CHAT, 1, rng=random.Random(0), now=_NOW)
+
+    assert [r["text"] for r in picked] == ["alpha"], (
+        "a remembered word with decayed FSRS retention must be revived into "
+        f"session selection; got {[r['text'] for r in picked]!r}"
+    )
+
+
+def test_select_word_keeps_fresh_remembered_excluded(
+    conn: sqlite3.Connection,
+) -> None:  # rated Good just now → retrievability ~1.0 → still excluded
+    wid = _add_word(conn, "alpha")
+    vocab.rate_word(conn, wid, Rating.Good, at=_NOW)
+    row = conn.execute("SELECT * FROM words WHERE id = ?", (wid,)).fetchone()
+    assert vocab._forget_prob(row, _NOW) < vocab.REMEMBERED_REVIVAL_FORGET_PROB, (
+        "fixture precondition: a just-rated word must be below the revival threshold"
+    )
+    _mark_remembered(conn, "alpha")
+
+    picked = vocab.select_session_words(conn, CHAT, 1, rng=random.Random(0), now=_NOW)
+
+    assert picked == [], (
+        "a freshly-rated remembered word must stay excluded from selection; "
+        f"got {[r['text'] for r in picked]!r}"
+    )
+
+
+def test_select_word_never_rated_remembered_stays_excluded(
+    conn: sqlite3.Connection,
+) -> None:  # stability NULL (forget_prob 1.0 by convention) → no revival
+    _add_word(conn, "alpha")
+    _mark_remembered(conn, "alpha")
+
+    picked = vocab.select_session_words(conn, CHAT, 1, rng=random.Random(0), now=_NOW)
+
+    assert picked == [], (
+        "revival needs FSRS evidence of decay — an unrated remembered word "
+        "(stability NULL) must stay excluded even though its conventional "
+        f"forget_prob is 1.0; got {[r['text'] for r in picked]!r}"
     )
 
 

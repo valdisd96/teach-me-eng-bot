@@ -249,6 +249,55 @@ def test_chat_disable_reasoning_works_on_llama_backend(
     )
 
 
+# chat() timeout kwarg ---------------------------------------------------
+
+
+def _capture_client_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Patch httpx.AsyncClient to record its constructor kwargs and reply OK."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    real = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        captured.update(kwargs)
+        kwargs["transport"] = transport
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    return captured
+
+
+def test_chat_timeout_kwarg_reaches_async_client(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # chat(..., timeout=10) → httpx.AsyncClient(timeout=10)
+    captured = _capture_client_kwargs(monkeypatch)
+    asyncio.run(llm.chat([{"role": "user", "content": "hi"}], timeout=10))
+    assert captured.get("timeout") == 10, (
+        f"chat(timeout=10) must construct AsyncClient with timeout=10; "
+        f"got {captured.get('timeout')!r}"
+    )
+
+
+def test_chat_default_timeout_is_180(
+    clean_env: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # default keeps the long-story budget: AsyncClient(timeout=180)
+    captured = _capture_client_kwargs(monkeypatch)
+    asyncio.run(llm.chat([{"role": "user", "content": "hi"}]))
+    assert captured.get("timeout") == 180, (
+        f"chat() default must construct AsyncClient with timeout=180; "
+        f"got {captured.get('timeout')!r}"
+    )
+
+
 # stream_chat() request shape -------------------------------------------
 
 

@@ -71,27 +71,34 @@ def story_messages(
     tone: str,
     *,
     rng: random.Random | None = None,
+    missing: list[str] | None = None,
 ) -> list[dict]:
     """Build the messages payload for the daily cloze-story session.
 
     The story must use every word in `words` literally exactly once —
     `cloze.blank_story` relies on that to place the numbered blanks.
+    `missing` names the words a previous attempt omitted; the retry prompt
+    calls them out explicitly instead of re-rolling blind.
     """
     resolved = resolve_tone(tone, rng=rng)
     listing = "\n".join(f"- {w}" for w in words)
+    content = (
+        f"Words to use (each exactly once):\n{listing}\n"
+        "Remember: every word above must appear in the story "
+        "exactly as written."
+    )
+    if missing:
+        content += (
+            "\nYour previous story omitted: "
+            + ", ".join(missing)
+            + ". Each of these MUST appear literally, exactly as written."
+        )
     return [
         {
             "role": "system",
             "content": f"{_STORY_SYSTEM}\n{_TONE_INSTRUCTIONS[resolved]}",
         },
-        {
-            "role": "user",
-            "content": (
-                f"Words to use (each exactly once):\n{listing}\n"
-                "Remember: every word above must appear in the story "
-                "exactly as written."
-            ),
-        },
+        {"role": "user", "content": content},
     ]
 
 

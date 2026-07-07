@@ -68,6 +68,16 @@ def _find_span(haystack_cf: str, word: str, taken: list[tuple[int, int]]) -> tup
     return None
 
 
+def _needle_forms(word: str) -> list[str]:
+    """Search forms for a vocab entry: as-is, plus the bare form of "to X"
+    infinitives (the story may legitimately use "run out of" for the stored
+    "to run out of"; inflected forms like "ran out of" do NOT match)."""
+    needle = word.casefold()
+    if needle.startswith("to "):
+        return [needle, needle[3:]]
+    return [needle]
+
+
 def blank_story(
     story: str, words: list[str]
 ) -> tuple[str, list[int], list[str]]:
@@ -78,7 +88,10 @@ def blank_story(
     blank number n → index into `words` (so `order[0]` is the word behind
     blank 1), and `missing` lists words that never appeared. Longer words
     are matched first so a phrase is never shadowed by one of its own
-    sub-words, and spans never overlap.
+    sub-words, and spans never overlap. Duplicate occurrences of a blanked
+    word (the model sometimes repeats one despite "exactly once") are
+    replaced with unnumbered `___` so the leftover text can't leak the
+    answer.
     """
     haystack = story.casefold()
     spans: dict[int, tuple[int, int]] = {}
@@ -86,31 +99,41 @@ def blank_story(
     for idx in sorted(
         range(len(words)), key=lambda i: len(words[i]), reverse=True
     ):
-        needle = words[idx].casefold()
-        span = _find_span(haystack, needle, taken)
-        if span is None and needle.startswith("to "):
-            # The story may legitimately use an infinitive-marked vocab entry
-            # without the "to" (e.g. "she ran out of milk" for "to run out
-            # of"'s bare form) — accept the bare phrase as the blank.
-            span = _find_span(haystack, needle[3:], taken)
+        for needle in _needle_forms(words[idx]):
+            span = _find_span(haystack, needle, taken)
+            if span is not None:
+                break
         if span is not None:
             spans[idx] = span
             taken.append(span)
     missing = [w for i, w in enumerate(words) if i not in spans]
     order = sorted(spans, key=lambda i: spans[i][0])
+    # Blank any further occurrences of successfully-blanked words too.
+    extra: list[tuple[int, int]] = []
+    for idx in spans:
+        for needle in _needle_forms(words[idx]):
+            while (span := _find_span(haystack, needle, taken)) is not None:
+                taken.append(span)
+                extra.append(span)
+    numbered = {spans[idx]: n for n, idx in enumerate(order, start=1)}
     out: list[str] = []
     cursor = 0
-    for n, idx in enumerate(order, start=1):
-        s, e = spans[idx]
+    for s, e in sorted(numbered.keys() | set(extra)):
         out.append(story[cursor:s])
-        out.append(f"___({n})")
+        n = numbered.get((s, e))
+        out.append(f"___({n})" if n is not None else "___")
         cursor = e
     out.append(story[cursor:])
     return "".join(out), order, missing
 
 
+# Surrounding punctuation a typed answer may carry ("cat.", "didn't!").
+_ANSWER_PUNCT = "\"'.,!?;:()[]{}«»„“”‘’-–—"
+
+
 def _normalize_answer(s: str) -> str:
     s = " ".join(s.strip().casefold().split())
+    s = s.strip(_ANSWER_PUNCT + " ")
     if s.startswith("to "):
         s = s[3:]
     return s
@@ -136,9 +159,11 @@ def classify_answer(
     "other" and must NOT be graded, so a stray chat message can't rate a
     word `Again` by accident.
     """
-    norm = _normalize_answer(user_text)
-    if norm in SKIP_TOKENS:
+    # Skip tokens are checked on the raw text: "?" would be stripped to ""
+    # by the punctuation-tolerant normalizer.
+    if user_text.strip().casefold() in SKIP_TOKENS:
         return "skip"
+    norm = _normalize_answer(user_text)
     if any(_normalize_answer(b.word) == norm for b in session.blanks):
         return "answer"
     return "other"
@@ -210,15 +235,15 @@ def format_answer_feedback(correct: bool, expected: str) -> str:
 
 
 def _bold_words(story: str, words: list[str]) -> str:
-    """HTML-escape `story` and wrap each word's first occurrence in <b>…</b>,
-    using the same span discovery as `blank_story` so the bolded words are
-    exactly the ones that were blanked."""
+    """HTML-escape `story` and wrap every occurrence of the given words in
+    <b>…</b>, using the same span discovery (including the bare-infinitive
+    fallback) as `blank_story` so the bolded words match the blanks."""
     haystack = story.casefold()
     taken: list[tuple[int, int]] = []
     for w in sorted(words, key=len, reverse=True):
-        span = _find_span(haystack, w.casefold(), taken)
-        if span is not None:
-            taken.append(span)
+        for needle in _needle_forms(w):
+            while (span := _find_span(haystack, needle, taken)) is not None:
+                taken.append(span)
     out: list[str] = []
     cursor = 0
     for s, e in sorted(taken):

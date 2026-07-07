@@ -150,14 +150,24 @@ async def compose_session(
         return None
 
     texts = [r["text"] for r in picked]
-    story, display, order, missing = "", "", [], texts
+    # Resolve "mixed" once so a retry keeps the same tone as the attempt it
+    # is fixing, and keep the BEST attempt — a retry that omits more words
+    # than the original must not win.
+    tone = prompts.resolve_tone(chat_row["tone"], rng=rng)
+    story, display, order, missing = "", "", [], list(texts)
+    prev_missing: list[str] | None = None
     for _ in range(retries + 1):
-        story = await llm_chat(
-            prompts.story_messages(texts, chat_row["tone"], rng=rng)
+        attempt_story = await llm_chat(
+            prompts.story_messages(texts, tone, rng=rng, missing=prev_missing)
         )
-        display, order, missing = cloze.blank_story(story, texts)
+        a_display, a_order, a_missing = cloze.blank_story(attempt_story, texts)
+        if prev_missing is None or len(a_missing) < len(missing):
+            story, display, order, missing = (
+                attempt_story, a_display, a_order, a_missing
+            )
         if not missing:
             break
+        prev_missing = a_missing
     if missing:
         log.warning(
             "Session for chat %s: dropping words missing from story: %s",

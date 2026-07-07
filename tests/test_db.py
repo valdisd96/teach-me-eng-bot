@@ -385,3 +385,51 @@ def test_init_db_adds_remembered_streak_to_legacy_db(tmp_path: Path) -> None:  #
     # Re-running init_db must remain idempotent on a now-migrated db.
     db_mod.init_db(c)
     c.close()
+
+
+# --- chats.pushes_per_day default + floor lift -------------------------------
+
+
+def test_chats_pushes_per_day_default_is_four(conn: sqlite3.Connection) -> None:
+    # Fresh schema: a chat row inserted without the column materialises as 4 —
+    # the words-per-story validator floor (config_flow.MIN_WORDS).
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, created_at) VALUES (1, 'UTC', '2026-07-07')"
+    )
+    row = conn.execute("SELECT pushes_per_day FROM chats").fetchone()
+    assert row["pushes_per_day"] == 4, (
+        f"chats.pushes_per_day must DEFAULT to 4; got {row['pushes_per_day']!r}"
+    )
+
+
+def test_init_db_lifts_pushes_per_day_below_four(conn: sqlite3.Connection) -> None:
+    # Rows created under the old DEFAULT 3 (or hand-set lower) would fail the
+    # 4–10 words-per-story validation on re-save; init_db lifts them to 4
+    # while leaving already-valid values untouched.
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, pushes_per_day, created_at) "
+        "VALUES (1, 'UTC', 3, '2026-07-07')"
+    )
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, pushes_per_day, created_at) "
+        "VALUES (2, 'UTC', 1, '2026-07-07')"
+    )
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, pushes_per_day, created_at) "
+        "VALUES (3, 'UTC', 4, '2026-07-07')"
+    )
+    conn.execute(
+        "INSERT INTO chats(chat_id, tz, pushes_per_day, created_at) "
+        "VALUES (4, 'UTC', 9, '2026-07-07')"
+    )
+
+    db_mod.init_db(conn)  # startup migration pass
+
+    values = {
+        r["chat_id"]: r["pushes_per_day"]
+        for r in conn.execute("SELECT chat_id, pushes_per_day FROM chats").fetchall()
+    }
+    assert values[1] == 4, f"3 must be lifted to the floor of 4; got {values[1]!r}"
+    assert values[2] == 4, f"1 must be lifted to the floor of 4; got {values[2]!r}"
+    assert values[3] == 4, f"4 is already valid and must stay; got {values[3]!r}"
+    assert values[4] == 9, f"9 is already valid and must stay; got {values[4]!r}"

@@ -58,6 +58,28 @@ def test_story_messages_reject_unknown_tone() -> None:
         prompts.story_messages(["alpha"], "whimsical")
 
 
+def test_story_messages_missing_appends_omitted_sentence() -> None:
+    msgs = prompts.story_messages(
+        ["alpha", "x"], "funny", rng=random.Random(0), missing=["x"]
+    )
+    user = msgs[1]["content"]
+    assert "Your previous story omitted: x" in user
+    assert "MUST appear literally" in user
+
+
+def test_story_messages_missing_none_is_byte_identical() -> None:
+    words = ["alpha", "beta"]
+    baseline = prompts.story_messages(words, "funny", rng=random.Random(0))
+    explicit = prompts.story_messages(
+        words, "funny", rng=random.Random(0), missing=None
+    )
+    assert explicit == baseline, (
+        "missing=None must leave the payload byte-identical to the "
+        "pre-`missing` behaviour"
+    )
+    assert "omitted" not in explicit[1]["content"]
+
+
 def test_explain_messages_has_system_and_user_with_word() -> None:
     msgs = prompts.explain_messages("ephemeral")
     assert [m["role"] for m in msgs] == ["system", "user"]

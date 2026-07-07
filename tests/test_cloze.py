@@ -76,10 +76,13 @@ def test_blank_story_accepts_bare_form_of_to_phrase() -> None:
     assert display == "We ___(1) milk."
 
 
-def test_blank_story_blanks_only_first_occurrence() -> None:
-    display, _, missing = cloze.blank_story("A frog met a frog.", ["frog"])
+def test_blank_story_numbers_first_occurrence_and_masks_duplicates() -> None:
+    # The first occurrence gets the numbered blank; further occurrences are
+    # masked with an unnumbered blank so they can't leak the answer.
+    display, order, missing = cloze.blank_story("A frog met a frog.", ["frog"])
     assert missing == []
-    assert display == "A ___(1) met a frog."
+    assert display == "A ___(1) met a ___."
+    assert order == [0]
 
 
 # --- grade_answer ---------------------------------------------------------------
@@ -98,6 +101,32 @@ def test_grade_answer_optional_leading_to() -> None:
 
 def test_grade_answer_collapses_inner_whitespace() -> None:
     assert cloze.grade_answer("run  out   of", "to run out of") is True
+
+
+def test_grade_answer_strips_surrounding_punctuation() -> None:
+    # A typed answer may carry sentence punctuation — "cat." still means cat.
+    assert cloze.grade_answer("cat.", "cat") is True
+    assert cloze.grade_answer('"cat"', "cat") is True
+    assert cloze.grade_answer("cat!?", "cat") is True
+
+
+def test_grade_answer_keeps_inner_apostrophe() -> None:
+    # Only *surrounding* punctuation is stripped — the apostrophe inside
+    # "didn't" must survive.
+    assert cloze.grade_answer("didn't!", "didn't") is True
+    assert cloze.grade_answer("didn't", "didnt") is False
+
+
+def test_classify_answer_tolerates_trailing_punctuation() -> None:
+    s = _session(["cat"], "A cat sat.")
+    assert cloze.classify_answer("cat.", s) == "answer"
+
+
+def test_classify_answer_bare_question_mark_is_still_skip() -> None:
+    # "?" is checked on the raw text — the punctuation-tolerant normalizer
+    # would strip it to "" and lose the skip intent.
+    s = _session(["cat"], "A cat sat.")
+    assert cloze.classify_answer("?", s) == "skip"
 
 
 # --- session state ----------------------------------------------------------------
@@ -155,6 +184,19 @@ def test_format_result_shows_story_score_and_missed_translations() -> None:
     assert "1/2" in out
     assert "бета" in out  # missed word carries its translation
     assert "❌ <b>beta</b>" in out
+
+
+def test_format_result_bolds_every_occurrence_with_bare_infinitive() -> None:
+    # Bolding reuses blank_story's span discovery: the "to X" entry matches
+    # its bare form, and *every* occurrence is bolded — including the
+    # duplicate that was masked with an unnumbered blank.
+    story = "She may run out of milk. He may run out of luck."
+    s = _session(["to run out of"], story)
+    cloze.apply_answer(s, True)
+    out = cloze.format_result(s)
+    assert out.count("<b>run out of</b>") == 2, (
+        f"both bare-form occurrences must be bolded; got {out!r}"
+    )
 
 
 def test_format_answer_feedback() -> None:
