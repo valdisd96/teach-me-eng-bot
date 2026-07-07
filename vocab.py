@@ -486,9 +486,14 @@ def record_outcome(
 
     When `source="repeat"` and `correct=False`, the word is "forget-flipped":
     `remembered` is detached and `focus:hard` attached so it re-enters the
-    push/game pool with a 2× selection weight. This branch is gated to
-    `source="repeat"` so multi-choice game misses (which run over
-    non-remembered words) do not accidentally graduate words to `focus:hard`.
+    push/game pool with a 2× selection weight. A `source="push"` miss flips
+    the same way but ONLY when the word currently carries `remembered` —
+    decayed graduates are re-admitted to daily sessions (see
+    `REMEMBERED_REVIVAL_FORGET_PROB`) and missing one there is the same
+    evidence of forgetting, while an ordinary in-progress miss keeps its old
+    consequences (streak reset + FSRS `Again`, no label flip). The gate
+    still excludes `source="game"` so multi-choice game misses do not
+    accidentally graduate words to `focus:hard`.
 
     `source="repeat"` additionally maintains `repeat_correct_streak`: a
     correct repeat bumps it by 1 (regardless of `weight`); a wrong repeat
@@ -549,6 +554,16 @@ def record_outcome(
                 detach_label(conn, word_id, remembered_id)
             hard_id = get_or_create_label(conn, chat_id, FOCUS_HARD_LABEL)
             attach_label(conn, word_id, hard_id)
+        elif source == "push":
+            remembered_id = find_label_id(conn, chat_id, REMEMBERED_LABEL)
+            was_remembered = remembered_id is not None and conn.execute(
+                "SELECT 1 FROM word_labels WHERE word_id = ? AND label_id = ?",
+                (word_id, remembered_id),
+            ).fetchone() is not None
+            if was_remembered:
+                detach_label(conn, word_id, remembered_id)
+                hard_id = get_or_create_label(conn, chat_id, FOCUS_HARD_LABEL)
+                attach_label(conn, word_id, hard_id)
 
 
 def _forget_prob(row: sqlite3.Row, now: datetime.datetime) -> float:
@@ -659,11 +674,24 @@ def _sample_weighted_many(
     now: datetime.datetime | None = None,
 ) -> list[sqlite3.Row]:
     """Weighted-random sample of up to `k` rows without replacement, minus
-    `remembered` words. Fewer than `k` when the pool runs dry."""
+    `remembered` words whose FSRS retention is still fresh. A remembered
+    word whose forgetting probability has decayed past
+    `REMEMBERED_REVIVAL_FORGET_PROB` is re-admitted so graduation doesn't
+    remove it from spaced repetition forever. Fewer than `k` when the pool
+    runs dry."""
     now = now or _now_dt()
     rng = rng or random
     excluded = remembered_word_ids(conn, chat_id)
-    pool = [r for r in rows if r["id"] not in excluded]
+    # Revival needs FSRS evidence of decay — an unrated remembered word
+    # (stability NULL → forget_prob 1.0 by convention) stays excluded.
+    pool = [
+        r for r in rows
+        if r["id"] not in excluded
+        or (
+            r["stability"] is not None
+            and _forget_prob(r, now) >= REMEMBERED_REVIVAL_FORGET_PROB
+        )
+    ]
     hard_ids = hard_focus_word_ids(conn, chat_id)
     picked: list[sqlite3.Row] = []
     while pool and len(picked) < k:
@@ -684,6 +712,10 @@ FOCUS_HARD_LABEL = "focus:hard"
 HARD_FOCUS_BOOST = 2.0
 MASTERED_LABEL = "mastered"
 MASTERED_THRESHOLD = 2
+# A `remembered` word re-enters session selection once its FSRS forgetting
+# probability climbs back above this — graduation pauses reviews, it must
+# not end them forever (the forgetting curve keeps moving).
+REMEMBERED_REVIVAL_FORGET_PROB = 0.3
 RESERVED_LABEL_NAMES: frozenset[str] = frozenset(
     {REMEMBERED_LABEL, FOCUS_HARD_LABEL, MASTERED_LABEL}
 )

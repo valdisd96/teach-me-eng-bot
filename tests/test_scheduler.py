@@ -124,6 +124,73 @@ def test_compose_session_drops_still_missing_words(
     assert [b.word for b in out.blanks] == ["ephemeral"]
 
 
+def test_compose_session_keeps_best_attempt_not_last(
+    conn: sqlite3.Connection,
+) -> None:
+    # Attempt 1 misses one word; the retry misses three. The retry must not
+    # win just because it ran last — the session keeps the attempt with the
+    # fewest missing words.
+    _seed_chat(conn)
+    for w in ("ephemeral", "placid", "lucid", "arid"):
+        vocab.add_word(conn, CHAT, w)
+
+    attempt_one = (
+        "The ephemeral mist drifted over the placid lake under a lucid sky."
+    )
+    attempt_two = "The ephemeral mist returned."  # misses placid, lucid, arid
+
+    calls: list[list[dict]] = []
+
+    async def llm_degrading(msgs):
+        calls.append(msgs)
+        return attempt_one if len(calls) == 1 else attempt_two
+
+    out = asyncio.run(
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_degrading, n_words=5, rng=random.Random(0)
+        )
+    )
+    assert out is not None
+    assert len(calls) == 2  # "arid" was missing → one retry
+    assert out.story == attempt_one, (
+        "the attempt with the fewest missing words must win, not the last one"
+    )
+    assert {b.word for b in out.blanks} == {"ephemeral", "placid", "lucid"}
+
+
+def test_compose_session_retry_prompt_names_omitted_words(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "ephemeral")
+    vocab.add_word(conn, CHAT, "arid")
+
+    calls: list[list[dict]] = []
+
+    async def llm_flaky(msgs):
+        calls.append(msgs)
+        if len(calls) == 1:
+            return "The ephemeral mist lingered."  # "arid" missing → retry
+        return "The ephemeral mist lingered over the arid land."
+
+    out = asyncio.run(
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_flaky, n_words=5, rng=random.Random(0)
+        )
+    )
+    assert out is not None
+    assert len(calls) == 2
+    first_user = calls[0][1]["content"]
+    assert "omitted" not in first_user, (
+        f"the first attempt must not carry the omitted-words sentence; got {first_user!r}"
+    )
+    retry_user = calls[1][1]["content"]
+    assert "omitted: arid" in retry_user, (
+        "the retry prompt must name the previous attempt's missing words after "
+        f"'omitted'; got {retry_user!r}"
+    )
+
+
 def test_compose_session_returns_none_when_no_word_lands(
     conn: sqlite3.Connection,
 ) -> None:

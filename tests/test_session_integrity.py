@@ -123,6 +123,22 @@ def test_classify_skip_tokens() -> None:
     assert cloze.classify_answer("?", s) == "skip"
 
 
+def test_classify_punctuated_bank_word_is_answer() -> None:
+    # Surrounding punctuation is stripped by the answer normalizer, so a
+    # typed "horse." still counts as the bank word.
+    s = _session([(1, "horse")])
+    assert cloze.classify_answer("horse.", s) == "answer"
+    assert cloze.classify_answer("Horse!", s) == "answer"
+
+
+def test_classify_bare_question_mark_stays_skip() -> None:
+    # "?" must be recognised on the raw text — the punctuation-tolerant
+    # normalizer would reduce it to "" and misroute the skip.
+    s = _session([(1, "horse")])
+    assert cloze.classify_answer("?", s) == "skip"
+    assert cloze.classify_answer(" ? ", s) == "skip"
+
+
 def test_classify_stray_text_is_other() -> None:
     s = _session([(1, "horse")])
     assert cloze.classify_answer("hi, what does horse mean??", s) == "other"

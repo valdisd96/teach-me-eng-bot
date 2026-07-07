@@ -76,6 +76,7 @@ ALLOWED_USER_IDS: set[int] = {
 CURSOR = "▌"
 EDIT_INTERVAL = 2.0   # seconds between Telegram message edits (rate-limit safe)
 MAX_MSG_LEN = 4000    # Telegram hard limit is 4096; responses past this spill into new messages
+MAX_HISTORY_MESSAGES = 41  # 1 system + 40 turns; older turns are dropped so the LLM context can't grow unbounded
 
 IMPORT_PENDING_TTL = 300.0   # /import → upload window (seconds)
 IMPORT_MAX_BYTES = 1_000_000  # cap on uploaded CSV size
@@ -207,6 +208,13 @@ def _typed_game_active(chat_id: int) -> bool:
 
 def fresh_history(system_prompt: str = SYSTEM_PROMPT) -> list[dict]:
     return [{"role": "system", "content": system_prompt}]
+
+
+def trim_history(history: list[dict], max_messages: int = MAX_HISTORY_MESSAGES) -> list[dict]:
+    """Keep the system message plus the most recent turns within the cap."""
+    if len(history) <= max_messages:
+        return history
+    return [history[0]] + history[-(max_messages - 1):]
 
 
 def start_conversation(chat_id: int) -> Path:
@@ -1558,8 +1566,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     drill = typed_drills.get(chat_id)
     if drill is not None and not drill.done:
         rd = drill.current()
+        judged = True
         if drill.kind == "repeat":
-            correct = await typed_drill.grade_answer_llm(user_text, rd)
+            verdict = await typed_drill.grade_answer_llm(user_text, rd)
+            # None = judge unavailable: score as strict-wrong, but record with
+            # source="game" so the miss can't demote a remembered word.
+            judged = verdict is not None
+            correct = bool(verdict)
         else:
             correct = typed_drill.grade_answer(user_text, rd)
         if correct:
@@ -1571,7 +1584,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             vocab.record_outcome(
                 conn, rd.word_id, correct=correct, weight=0.5,
-                source="repeat" if drill.kind == "repeat" else "game",
+                source="repeat" if drill.kind == "repeat" and judged else "game",
             )
         except KeyError:
             log.warning("record_outcome: unknown word_id %s", rd.word_id)
@@ -1603,6 +1616,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         histories[chat_id][0]["content"] = system
 
     histories[chat_id].append({"role": "user", "content": user_text})
+    histories[chat_id] = trim_history(histories[chat_id])
     append_turn(chat_id, "user", user_text)
 
     current_msg = await update.message.reply_text(CURSOR)
@@ -1649,6 +1663,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     mentioned = vocab.scan_mentions(accumulated, id_pairs)
     if mentioned:
         vocab.bump_mentions(conn, mentioned)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Central PTB error handler: log everything, tell the user something.
+
+    Without one, an exception escaping any handler is only swallowed by
+    PTB's "No error handlers are registered" fallback and the user gets
+    dead silence. Polling-level network errors arrive with update=None and
+    are just logged.
+    """
+    log.error("Unhandled exception in handler", exc_info=context.error)
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id, text="⚠️ something went wrong — please try again"
+        )
+    except Exception:  # noqa: BLE001 — never raise from the error handler
+        log.exception("Failed to notify chat %s about an error", chat.id)
 
 
 # --- bootstrap --------------------------------------------------------------
@@ -1750,6 +1784,7 @@ def main() -> None:
 
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(on_error)
 
     log.info("Bot started. Polling...")
     app.run_polling(drop_pending_updates=True)

@@ -489,6 +489,28 @@ def _patch_llm_chat(monkeypatch: pytest.MonkeyPatch, reply: object) -> _LLMRecor
     return rec
 
 
+class _LLMRecorderKwargs(_LLMRecorder):
+    """`_LLMRecorder` variant that also records the kwargs of each call."""
+
+    def __init__(self, reply: object) -> None:
+        super().__init__(reply)
+        self.kwargs: list[dict] = []
+
+    async def __call__(self, messages: list[dict], **kwargs) -> str:
+        self.kwargs.append(kwargs)
+        return await super().__call__(messages, **kwargs)
+
+
+def _patch_llm_chat_kwargs(
+    monkeypatch: pytest.MonkeyPatch, reply: object
+) -> _LLMRecorderKwargs:
+    import llm as llm_mod
+
+    rec = _LLMRecorderKwargs(reply)
+    monkeypatch.setattr(llm_mod, "chat", rec)
+    return rec
+
+
 def _patch_llm_chat_must_not_be_called(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Replace llm.chat with one that fails the test if called. Used for fast-path."""
     import llm as llm_mod
@@ -618,21 +640,22 @@ def test_grade_answer_llm_perhaps_returns_false(
 # --- AC4 — exception path collapses to False --------------------------------
 
 
-def test_grade_answer_llm_request_error_returns_false(
+def test_grade_answer_llm_request_error_returns_none(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # AC4 + error: httpx.RequestError → False, no propagation
+) -> None:  # AC4 + error: httpx.RequestError → None (judge unavailable)
     _patch_llm_chat(monkeypatch, httpx.ConnectError("simulated"))
     rd = _round(expected="кошка")
     # Must NOT raise.
     result = asyncio.run(td.grade_answer_llm("собака", rd))
-    assert result is False, (
-        f"AC4 — transport error must collapse to False (strict-equality fallback), got {result!r}"
+    assert result is None, (
+        f"transport error must yield None (unavailable, not a judgment) so the "
+        f"caller can skip remembered-demotion; got {result!r}"
     )
 
 
-def test_grade_answer_llm_http_status_error_returns_false(
+def test_grade_answer_llm_http_status_error_returns_none(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # AC4 + error: httpx.HTTPStatusError → False
+) -> None:  # AC4 + error: httpx.HTTPStatusError → None
     fake_req = httpx.Request("POST", "http://x.local/")
     fake_resp = httpx.Response(503, request=fake_req)
     _patch_llm_chat(
@@ -640,49 +663,68 @@ def test_grade_answer_llm_http_status_error_returns_false(
     )
     rd = _round(expected="кошка")
     result = asyncio.run(td.grade_answer_llm("собака", rd))
-    assert result is False, f"AC4 — HTTPStatusError must collapse to False, got {result!r}"
+    assert result is None, f"HTTPStatusError must yield None, got {result!r}"
 
 
-def test_grade_answer_llm_keyerror_returns_false(
+def test_grade_answer_llm_keyerror_returns_none(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # AC4 + error: KeyError on response shape → False
+) -> None:  # AC4 + error: KeyError on response shape → None
     _patch_llm_chat(monkeypatch, KeyError("choices"))
     rd = _round(expected="кошка")
     result = asyncio.run(td.grade_answer_llm("собака", rd))
-    assert result is False, f"AC4 — KeyError must collapse to False, got {result!r}"
+    assert result is None, f"KeyError must yield None, got {result!r}"
 
 
-def test_grade_answer_llm_generic_exception_returns_false(
+def test_grade_answer_llm_generic_exception_returns_none(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # AC4 — any other exception type → False
+) -> None:  # AC4 — any other exception type → None
     _patch_llm_chat(monkeypatch, RuntimeError("anything else"))
     rd = _round(expected="кошка")
     result = asyncio.run(td.grade_answer_llm("собака", rd))
-    assert result is False, (
-        f"AC4 — generic exception must collapse to False, got {result!r}"
+    assert result is None, (
+        f"generic exception must yield None, got {result!r}"
     )
 
 
-# --- AC5 — unparseable replies collapse to False ----------------------------
+# --- judge call is capped at JUDGE_TIMEOUT_S ---------------------------------
 
 
-def test_grade_answer_llm_empty_reply_returns_false(
+def test_grade_answer_llm_passes_judge_timeout(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # AC5 + edge: "" reply → False (no first token)
+) -> None:  # the judge call must carry timeout=JUDGE_TIMEOUT_S (10) to llm.chat
+    rec = _patch_llm_chat_kwargs(monkeypatch, "NO")
+    rd = _round(expected="кошка")
+    asyncio.run(td.grade_answer_llm("собака", rd))
+    assert len(rec.kwargs) == 1, (
+        f"fast-path miss must consult llm.chat exactly once; got {len(rec.kwargs)}"
+    )
+    assert rec.kwargs[0].get("timeout") == td.JUDGE_TIMEOUT_S == 10, (
+        "the judge call must be capped at JUDGE_TIMEOUT_S=10 (PTB is sequential — "
+        f"a hung backend would freeze every chat); got "
+        f"timeout={rec.kwargs[0].get('timeout')!r}"
+    )
+
+
+# --- AC5 — empty replies mean the judge is unavailable -----------------------
+
+
+def test_grade_answer_llm_empty_reply_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # AC5 + edge: "" reply → None (no judgment made)
     _patch_llm_chat(monkeypatch, "")
     rd = _round(expected="кошка")
     result = asyncio.run(td.grade_answer_llm("собака", rd))
-    assert result is False, f"AC5 — empty reply must yield False, got {result!r}"
+    assert result is None, f"empty reply must yield None, got {result!r}"
 
 
-def test_grade_answer_llm_whitespace_reply_returns_false(
+def test_grade_answer_llm_whitespace_reply_returns_none(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:  # AC5 + edge: "   " whitespace-only reply → False
+) -> None:  # AC5 + edge: "   " whitespace-only reply → None
     _patch_llm_chat(monkeypatch, "   ")
     rd = _round(expected="кошка")
     result = asyncio.run(td.grade_answer_llm("собака", rd))
-    assert result is False, (
-        f"AC5 — whitespace-only reply must yield False, got {result!r}"
+    assert result is None, (
+        f"whitespace-only reply must yield None, got {result!r}"
     )
 
 
@@ -790,6 +832,14 @@ def _repeat_streak(conn: sqlite3.Connection, word_id: int) -> int:
     return conn.execute(
         "SELECT repeat_correct_streak FROM words WHERE id = ?", (word_id,)
     ).fetchone()["repeat_correct_streak"]
+
+
+def _has_label(conn: sqlite3.Connection, word_id: int, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM word_labels wl JOIN labels l ON l.id = wl.label_id "
+        "WHERE wl.word_id = ? AND l.name = ?",
+        (word_id, name),
+    ).fetchone() is not None
 
 
 # --- gm:repeat / gm:focus start ----------------------------------------------
@@ -932,6 +982,86 @@ def test_handle_message_repeat_wrong_consults_llm_judge(
     )
     first_reply = update.message.reply_text.call_args_list[0].args[0]
     assert first_reply == "❌ correct: tr_alpha"
+
+
+def test_handle_message_repeat_judge_unavailable_does_not_demote(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # judge returns None → scored wrong but source="game": no forget-flip
+    _patch_bot(monkeypatch, conn)
+    ids = _seed_words(conn, ["alpha", "beta"], remembered=True)
+    conn.execute(
+        "UPDATE words SET repeat_correct_streak = 1 WHERE id = ?", (ids["alpha"],)
+    )
+
+    async def judge_unavailable(user_text: str, rd: td.Round) -> bool | None:
+        return None
+
+    monkeypatch.setattr(td, "grade_answer_llm", judge_unavailable)
+    rounds = [
+        td.Round(word_id=ids["alpha"], prompt="alpha", expected="tr_alpha", direction="en2ru"),
+        td.Round(word_id=ids["beta"], prompt="beta", expected="tr_beta", direction="en2ru"),
+    ]
+    bot.typed_drills[CHAT] = td.Game(chat_id=CHAT, rounds=rounds, kind="repeat")
+
+    update = _make_message_update("совсем не то")
+    asyncio.run(bot.handle_message(update, _make_context()))
+
+    # Scored as strict-wrong for the round…
+    first_reply = update.message.reply_text.call_args_list[0].args[0]
+    assert first_reply == "❌ correct: tr_alpha", (
+        f"judge-unavailable round must be scored wrong; got {first_reply!r}"
+    )
+    game = bot.typed_drills[CHAT]
+    assert game.score == 0 and game.wrong == ["alpha"]
+    # …but recorded with source="game": no consequences that assume a real
+    # judgment. The remembered word must NOT be demoted.
+    assert _has_label(conn, ids["alpha"], vocab.REMEMBERED_LABEL), (
+        "judge unavailable (None) must not detach `remembered` — that demotion "
+        "requires a real NO judgment"
+    )
+    assert not _has_label(conn, ids["alpha"], vocab.FOCUS_HARD_LABEL), (
+        "judge unavailable (None) must not attach `focus:hard`"
+    )
+    assert _repeat_streak(conn, ids["alpha"]) == 1, (
+        "source='game' must leave repeat_correct_streak untouched when the "
+        "judge was unavailable"
+    )
+
+
+def test_handle_message_repeat_real_no_verdict_demotes(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:  # contrast: judge returns False (real judgment) → forget-flip fires
+    _patch_bot(monkeypatch, conn)
+    ids = _seed_words(conn, ["alpha", "beta"], remembered=True)
+    conn.execute(
+        "UPDATE words SET repeat_correct_streak = 1 WHERE id = ?", (ids["alpha"],)
+    )
+
+    async def judge_no(user_text: str, rd: td.Round) -> bool | None:
+        return False
+
+    monkeypatch.setattr(td, "grade_answer_llm", judge_no)
+    rounds = [
+        td.Round(word_id=ids["alpha"], prompt="alpha", expected="tr_alpha", direction="en2ru"),
+        td.Round(word_id=ids["beta"], prompt="beta", expected="tr_beta", direction="en2ru"),
+    ]
+    bot.typed_drills[CHAT] = td.Game(chat_id=CHAT, rounds=rounds, kind="repeat")
+
+    update = _make_message_update("совсем не то")
+    asyncio.run(bot.handle_message(update, _make_context()))
+
+    first_reply = update.message.reply_text.call_args_list[0].args[0]
+    assert first_reply == "❌ correct: tr_alpha"
+    # A real NO is recorded with source="repeat" — the forget-flip fires.
+    assert not _has_label(conn, ids["alpha"], vocab.REMEMBERED_LABEL), (
+        "a real NO verdict must detach `remembered` (forget-flip)"
+    )
+    assert _has_label(conn, ids["alpha"], vocab.FOCUS_HARD_LABEL), (
+        "a real NO verdict must attach `focus:hard`"
+    )
+    assert _repeat_streak(conn, ids["alpha"]) == 0, (
+        "source='repeat' wrong must reset repeat_correct_streak"
+    )
 
 
 def test_handle_message_focus_grades_strictly_source_game(

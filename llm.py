@@ -126,6 +126,7 @@ async def chat(
     max_tokens: int = 256,
     temperature: float = 0.8,
     disable_reasoning: bool = False,
+    timeout: float = 180,
 ) -> str:
     """Return the full assistant reply as a single string (no streaming).
 
@@ -147,7 +148,7 @@ async def chat(
     }
     if disable_reasoning:
         body["reasoning"] = {"enabled": False}
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(backend.url, headers=backend.headers, json=body)
         r.raise_for_status()
         return _parse_completion(r.json())

@@ -241,9 +241,9 @@ def test_record_outcome_wrong_game_no_label_changes(
     )
 
 
-def test_record_outcome_wrong_push_no_label_changes(
+def test_record_outcome_wrong_push_flips_remembered_word(
     conn: sqlite3.Connection,
-) -> None:  # AC1c — source="push" + wrong: streak reset only, no label changes
+) -> None:  # a push miss on a REMEMBERED word is evidence of forgetting → flip
     word_id = _add_word(conn)
     _mark_remembered(conn, "apple")
     conn.execute(
@@ -253,13 +253,26 @@ def test_record_outcome_wrong_push_no_label_changes(
     vocab.record_outcome(conn, word_id, correct=False, weight=1.0, source="push")
 
     labels = set(vocab.labels_for_word(conn, word_id))
-    assert vocab.REMEMBERED_LABEL in labels, (
-        f"AC1c — wrong/push must NOT detach `remembered` (regression guard); "
-        f"got {labels!r}"
+    assert vocab.REMEMBERED_LABEL not in labels, (
+        f"wrong/push on a remembered word must detach `remembered` (re-admitted "
+        f"decayed graduates get re-tested in sessions); got {labels!r}"
     )
+    assert vocab.FOCUS_HARD_LABEL in labels, (
+        f"wrong/push on a remembered word must attach `focus:hard`; got {labels!r}"
+    )
+
+
+def test_record_outcome_wrong_push_plain_word_no_label_changes(
+    conn: sqlite3.Connection,
+) -> None:  # a push miss on an ORDINARY word: streak reset only, no label flip
+    word_id = _add_word(conn)
+
+    vocab.record_outcome(conn, word_id, correct=False, weight=1.0, source="push")
+
+    labels = set(vocab.labels_for_word(conn, word_id))
     assert vocab.FOCUS_HARD_LABEL not in labels, (
-        f"AC1c — wrong/push must NOT attach `focus:hard` (forget-flip is "
-        f"repeat-only); got {labels!r}"
+        f"wrong/push on a non-remembered word must NOT attach `focus:hard`; "
+        f"got {labels!r}"
     )
 
 

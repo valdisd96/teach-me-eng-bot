@@ -16,7 +16,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
     chat_id          INTEGER PRIMARY KEY,
     tz               TEXT    NOT NULL,
-    pushes_per_day   INTEGER NOT NULL DEFAULT 3,
+    pushes_per_day   INTEGER NOT NULL DEFAULT 4,
     active_start     TEXT    NOT NULL DEFAULT '09:00',
     active_end       TEXT    NOT NULL DEFAULT '21:00',
     tone             TEXT    NOT NULL DEFAULT 'mixed',
@@ -128,3 +128,11 @@ def init_db(conn: sqlite3.Connection) -> None:
         # Serialized in-flight cloze session (see cloze.session_to_json) so a
         # restart can rehydrate the day's story instead of stranding it.
         conn.execute("ALTER TABLE push_log ADD COLUMN session_json TEXT")
+    # The column stores words-per-story, whose validator floor is 4
+    # (config_flow.MIN_WORDS); rows created by ensure_chat under the old
+    # DEFAULT 3 would fail that validation on re-save. (Pre-schema legacy
+    # DBs may lack the column entirely — skip until CREATE TABLE adds it.)
+    if "pushes_per_day" in _column_names(conn, "chats"):
+        conn.execute(
+            "UPDATE chats SET pushes_per_day = 4 WHERE pushes_per_day < 4"
+        )

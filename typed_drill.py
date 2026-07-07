@@ -25,6 +25,7 @@ import prompts
 REPEAT_ROUNDS = 5      # Repeat is always exactly this many rounds
 MIN_ROUNDS = 5         # smallest translatable pool either drill accepts
 MAX_FOCUS_ROUNDS = 10  # Focus drill scales with the pool up to this cap
+JUDGE_TIMEOUT_S = 10   # the whole bot blocks on the judge (PTB is sequential)
 
 Direction = Literal["en2ru", "ru2en"]
 DrillKind = Literal["repeat", "focus"]
@@ -130,15 +131,19 @@ def grade_answer(user_text: str, rd: Round) -> bool:
     return user_text.strip().casefold() == rd.expected.strip().casefold()
 
 
-async def grade_answer_llm(user_text: str, rd: Round) -> bool:
+async def grade_answer_llm(user_text: str, rd: Round) -> bool | None:
     """Tolerant grading via an LLM yes/no judge with a strict-equality fast path.
 
     Returns True when the case-folded / whitespace-stripped ``user_text``
     equals ``rd.expected`` (no LLM call), OR when ``llm.chat`` resolves to a
-    reply whose first non-whitespace token equals ``YES`` (case-insensitive).
-    Any other path — explicit ``NO``, unparseable reply, or transport error
-    from ``llm.chat`` — yields False, so a flaky backend degrades to strict
-    equality rather than auto-accepting.
+    reply whose first non-whitespace token starts with ``YES``
+    (case-insensitive). A reply that starts with anything else is a real
+    judgment → False. Returns ``None`` when the judge was UNAVAILABLE
+    (transport error or empty reply) — the caller must degrade gracefully:
+    treat the round as strict-wrong for scoring, but skip consequences that
+    assume a real judgment (e.g. demoting a `remembered` word). The call is
+    capped at ``JUDGE_TIMEOUT_S`` because PTB processes updates sequentially
+    — a hung backend would otherwise freeze every chat.
     """
     if grade_answer(user_text, rd):
         return True
@@ -150,10 +155,13 @@ async def grade_answer_llm(user_text: str, rd: Round) -> bool:
             max_tokens=4,
             temperature=0.0,
             disable_reasoning=True,
+            timeout=JUDGE_TIMEOUT_S,
         )
-    except Exception:  # noqa: BLE001 — any failure falls back to strict
-        return False
-    head = reply.strip().split(None, 1)[0].upper() if reply.strip() else ""
+    except Exception:  # noqa: BLE001 — judge unavailable, not a judgment
+        return None
+    if not reply.strip():
+        return None
+    head = reply.strip().split(None, 1)[0].upper()
     return head.startswith("YES")
 
 
