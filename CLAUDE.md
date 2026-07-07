@@ -104,6 +104,26 @@ Each factor lives in `[0, 1]`, lifted to `[1, 2]` so no single signal dominates.
 
 `vocab.select_session_words` builds the daily session's word list: up to `max_intro` weighted picks from the introduction pool (`reps < INTRO_GRADUATION_REPS`, minus `remembered`, ignoring label filters) come first, then the remaining slots are filled from the (focus-scoped) regular pool — all sampled without replacement via the same weight formula (`_sample_weighted_many`). `vocab.select_intro_word` is the single-pick variant still used elsewhere.
 
+## Bulk labelling CLI (external agents)
+
+`scripts/labels_cli.py` lets an external agent (the Hermes-side "label new
+words" skill) tag vocabulary in bulk with a stronger model than the bot's
+own backend — issue #101 removed add-time LLM label suggestions precisely
+because the free model was too weak, so labelling intelligence lives
+outside the bot:
+
+- `labels_cli.py dump --chat-id N` → JSON with the chat's unlabelled words
+  (plus translations) and the existing non-reserved taxonomy (counts +
+  example words), via `vocab.dump_labelling_state`.
+- `labels_cli.py apply --chat-id N --file mapping.json [--dry-run]` →
+  attaches a `{word: [labels]}` mapping through `vocab.apply_label_mapping`:
+  existing words only (unknown words are reported, never inserted), spec
+  validation via `parse_label_spec`, at most one `pos:*`, reserved system
+  labels rejected, `attach_label` one-POS replacement semantics, idempotent.
+
+Run with the project venv from the repo root. Neither path is imported by
+`bot.py`; deploying it needs only a `git pull` on the VPS, no restart.
+
 ## SQLite
 
 - Path: `data/vocab.db` (git-ignored). Created on first run.

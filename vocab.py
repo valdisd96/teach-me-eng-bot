@@ -1136,6 +1136,125 @@ def labels_with_counts(
     return [(r["name"], r["n"]) for r in rows]
 
 
+def dump_labelling_state(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    *,
+    examples_per_label: int = 5,
+) -> dict:
+    """Everything an external labelling agent needs, as one JSON-able dict.
+
+    `unlabelled` lists words carrying no labels at all (with translations for
+    context); `taxonomy` lists the chat's user-facing labels with counts and
+    a few example words each — reserved system labels (`remembered`,
+    `focus:hard`, `mastered`) are internal state, not vocabulary groups, so
+    they are excluded. Consumed by `scripts/labels_cli.py dump`.
+    """
+    unlabelled = conn.execute(
+        "SELECT text, translation FROM words w "
+        "WHERE chat_id = ? "
+        "  AND NOT EXISTS (SELECT 1 FROM word_labels wl WHERE wl.word_id = w.id) "
+        "ORDER BY text ASC",
+        (chat_id,),
+    ).fetchall()
+    taxonomy = []
+    for name, count in labels_with_counts(conn, chat_id):
+        if name in RESERVED_LABEL_NAMES:
+            continue
+        examples = conn.execute(
+            "SELECT w.text FROM words w "
+            "JOIN word_labels wl ON wl.word_id = w.id "
+            "JOIN labels l ON l.id = wl.label_id "
+            "WHERE l.chat_id = ? AND l.name = ? "
+            "ORDER BY w.text ASC LIMIT ?",
+            (chat_id, name, examples_per_label),
+        ).fetchall()
+        taxonomy.append(
+            {
+                "name": name,
+                "count": count,
+                "examples": [r["text"] for r in examples],
+            }
+        )
+    return {
+        "chat_id": chat_id,
+        "words_total": count_words(conn, chat_id),
+        "unlabelled": [
+            {"word": r["text"], "translation": r["translation"]}
+            for r in unlabelled
+        ],
+        "taxonomy": taxonomy,
+    }
+
+
+def apply_label_mapping(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    items: list[tuple[str, list[str]]],
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Attach labels to EXISTING words from `(word, labels)` pairs.
+
+    Unlike `import_rows`, an unknown word is never inserted — it lands in
+    `unknown_words` so an external agent's typo can't pollute the vocab.
+    Per item: word lookup is case-insensitive; the label list must pass
+    `parse_label_spec`, contain at most one `pos:*`, and no reserved system
+    label — violations land in `rejected` as `(word, message)` and write
+    nothing for that item. Attaching goes through `attach_label`, so a
+    differing existing `pos:*` is replaced and re-attaching is a no-op.
+
+    With `dry_run=True` nothing is written; the summary reports what an
+    identical live run would do. Returns `{"applied": int, "attached": int,
+    "unchanged": int, "unknown_words": [...], "rejected": [...]}` where
+    `applied` counts words that gained at least one label row and
+    `attached` counts the label rows themselves.
+    """
+    applied = 0
+    attached = 0
+    unchanged = 0
+    unknown_words: list[str] = []
+    rejected: list[tuple[str, str]] = []
+    for word, raw_labels in items:
+        word_id = find_word_id(conn, chat_id, word)
+        if word_id is None:
+            unknown_words.append(word)
+            continue
+        try:
+            labels = parse_label_spec(list(raw_labels))
+        except ValueError as exc:
+            rejected.append((word, str(exc)))
+            continue
+        if sum(1 for n in labels if n.startswith(POS_PREFIX)) > 1:
+            rejected.append((word, "more than one pos:* label"))
+            continue
+        reserved = [n for n in labels if n in RESERVED_LABEL_NAMES]
+        if reserved:
+            rejected.append((word, f"reserved label: {', '.join(reserved)}"))
+            continue
+        existing = set(labels_for_word(conn, word_id))
+        new_rows = 0
+        for name in labels:
+            if name in existing:
+                continue
+            new_rows += 1
+            if not dry_run:
+                label_id = get_or_create_label(conn, chat_id, name)
+                attach_label(conn, word_id, label_id)
+        if new_rows:
+            applied += 1
+            attached += new_rows
+        else:
+            unchanged += 1
+    return {
+        "applied": applied,
+        "attached": attached,
+        "unchanged": unchanged,
+        "unknown_words": unknown_words,
+        "rejected": rejected,
+    }
+
+
 def find_label_id(
     conn: sqlite3.Connection, chat_id: int, name: str
 ) -> int | None:
