@@ -1,16 +1,15 @@
-"""Typed-answer translation drills: "Repeat" and "Focus drill".
+"""Typed-answer translation drill — one game, two word sources.
 
-One engine, two pools. ``kind="repeat"`` drills the chat's
-`remembered`-but-not-`mastered` words in a fixed ``REPEAT_ROUNDS`` rounds
-(bot.py grades it with the tolerant LLM judge and records
-``source="repeat"``, which drives the forget-flip / mastered machinery);
-``kind="focus"`` drills the `/focus`-scoped in-progress words for up to
-``MAX_FOCUS_ROUNDS`` rounds with strict grading and ``source="game"``.
-Everything here is pure except ``grade_answer_llm`` (one LLM call); no
-telegram imports, no DB writes — `bot.py` wires the pool queries,
-plain-text input routing, and the end-of-session summary. Game state is
-per-chat and held only in process memory; a bot restart silently abandons
-in-flight games.
+The "Typed drill" `/games` button drills the chat's `/focus`-scoped
+in-progress words (strict grading, ``source="game"``) and salts in up to
+``MAX_SALT`` `remembered`-but-not-`mastered` words per game as mastery
+checks. Salted rounds carry ``Round.judged=True``: bot.py grades them with
+the tolerant LLM judge and records ``source="repeat"``, which drives the
+forget-flip / mastered machinery. Everything here is pure except
+``grade_answer_llm`` (one LLM call); no telegram imports, no DB writes —
+`bot.py` wires the pool queries, plain-text input routing, and the
+end-of-session summary. Game state is per-chat and held only in process
+memory; a bot restart silently abandons in-flight games.
 """
 
 from __future__ import annotations
@@ -22,13 +21,12 @@ from typing import Iterable, Literal
 import llm
 import prompts
 
-REPEAT_ROUNDS = 5      # Repeat is always exactly this many rounds
-MIN_ROUNDS = 5         # smallest translatable pool either drill accepts
-MAX_FOCUS_ROUNDS = 10  # Focus drill scales with the pool up to this cap
+MIN_ROUNDS = 5         # smallest translatable focus pool the drill accepts
+MAX_ROUNDS = 10        # total rounds cap (focus + salt)
+MAX_SALT = 2           # remembered words salted in per game as mastery checks
 JUDGE_TIMEOUT_S = 10   # the whole bot blocks on the judge (PTB is sequential)
 
 Direction = Literal["en2ru", "ru2en"]
-DrillKind = Literal["repeat", "focus"]
 
 
 @dataclass
@@ -37,13 +35,15 @@ class Round:
     prompt: str
     expected: str
     direction: Direction
+    # True for salted `remembered` words: LLM-judged, recorded as
+    # source="repeat" so a miss forget-flips and a streak masters.
+    judged: bool = False
 
 
 @dataclass
 class Game:
     chat_id: int
     rounds: list[Round]
-    kind: DrillKind = "focus"
     score: int = 0
     current_round: int = 0
     wrong: list[str] = field(default_factory=list)
@@ -75,20 +75,52 @@ def _row_view(row) -> tuple[int, str, str] | None:
     return int(rid), str(text), translation
 
 
+def _filter_pool(rows: Iterable) -> list[tuple[int, str, str]]:
+    pool: list[tuple[int, str, str]] = []
+    for r in rows:
+        v = _row_view(r)
+        if v is not None:
+            pool.append(v)
+    return pool
+
+
+def _make_round(
+    entry: tuple[int, str, str], *, judged: bool, rng: random.Random
+) -> Round:
+    wid, text, translation = entry
+    direction: Direction = "en2ru" if rng.random() < 0.5 else "ru2en"
+    if direction == "en2ru":
+        prompt, expected = text, translation
+    else:
+        prompt, expected = translation, text
+    return Round(
+        word_id=wid,
+        prompt=prompt,
+        expected=expected,
+        direction=direction,
+        judged=judged,
+    )
+
+
 def draw_rounds(
-    rows: Iterable,
+    focus_rows: Iterable,
+    remembered_rows: Iterable = (),
     *,
-    n_max: int,
+    n_max: int = MAX_ROUNDS,
+    n_salt: int = MAX_SALT,
     min_rounds: int = MIN_ROUNDS,
     rng: random.Random | None = None,
 ) -> list[Round]:
-    """Sample up to ``n_max`` translatable rows and pick a direction per round.
+    """Draw one Typed-drill game: focus-pool rounds plus salted mastery checks.
 
-    Rows whose translation is None/empty/whitespace are filtered first; the
-    surviving pool must contain at least ``min_rounds`` rows or ``ValueError``
-    is raised. The round count is ``min(n_max, len(pool))`` — with
-    ``n_max == min_rounds`` (Repeat) that is always exactly ``n_max``. Each
-    round's direction is chosen independently from ``rng``.
+    Rows whose translation is None/empty/whitespace are filtered from both
+    pools. The focus pool must keep at least ``min_rounds`` rows or
+    ``ValueError`` is raised — the salt never counts toward the minimum.
+    Up to ``n_salt`` remembered rows become ``judged=True`` rounds; focus
+    rounds fill the rest of the ``n_max`` budget (``min(n_max - salt,
+    pool)``). All sampling is without replacement, each round's direction
+    is chosen independently from ``rng``, and the final order is shuffled
+    so the mastery checks don't cluster at the end.
     """
     if min_rounds <= 0:
         raise ValueError(f"min_rounds must be positive, got {min_rounds}")
@@ -96,33 +128,30 @@ def draw_rounds(
         raise ValueError(
             f"n_max ({n_max}) must be >= min_rounds ({min_rounds})"
         )
+    if n_salt < 0:
+        raise ValueError(f"n_salt must be >= 0, got {n_salt}")
     rng = rng or random.Random()
-    pool: list[tuple[int, str, str]] = []
-    for r in rows:
-        v = _row_view(r)
-        if v is not None:
-            pool.append(v)
-    if len(pool) < min_rounds:
+    focus_pool = _filter_pool(focus_rows)
+    if len(focus_pool) < min_rounds:
         raise ValueError(
-            f"need at least {min_rounds} translatable rows, got {len(pool)}"
+            f"need at least {min_rounds} translatable rows, got {len(focus_pool)}"
         )
-    n_rounds = min(n_max, len(pool))
-    chosen = rng.sample(pool, n_rounds)
-    out: list[Round] = []
-    for wid, text, translation in chosen:
-        direction: Direction = "en2ru" if rng.random() < 0.5 else "ru2en"
-        if direction == "en2ru":
-            prompt, expected = text, translation
-        else:
-            prompt, expected = translation, text
-        out.append(
-            Round(
-                word_id=wid,
-                prompt=prompt,
-                expected=expected,
-                direction=direction,
-            )
-        )
+    # A word in both pools plays as a focus round, not a mastery check.
+    focus_ids = {wid for wid, _, _ in focus_pool}
+    salt_pool = [
+        e for e in _filter_pool(remembered_rows) if e[0] not in focus_ids
+    ]
+    n_salt_actual = min(n_salt, len(salt_pool))
+    n_focus = min(n_max - n_salt_actual, len(focus_pool))
+    out = [
+        _make_round(e, judged=False, rng=rng)
+        for e in rng.sample(focus_pool, n_focus)
+    ]
+    out += [
+        _make_round(e, judged=True, rng=rng)
+        for e in rng.sample(salt_pool, n_salt_actual)
+    ]
+    rng.shuffle(out)
     return out
 
 

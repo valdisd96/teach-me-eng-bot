@@ -1,11 +1,12 @@
 """Tests for issue #141 — mastered label after 2 consecutive correct repeats.
 
-A correct answer in the Repeat mini-game (source="repeat") bumps a new
-`words.repeat_correct_streak` integer by 1; a wrong repeat resets it to 0.
-When the streak reaches `MASTERED_THRESHOLD` (2) on a correct repeat, the
-`mastered` system label is auto-attached. Mastered words are excluded from
-the Repeat-game pool. `mastered` joins `RESERVED_LABEL_NAMES`, so `/label`
-and `/unlabel` reject it the same way they reject `remembered`.
+A correct answer in a Typed-drill mastery check (a salted judged round,
+source="repeat") bumps a new `words.repeat_correct_streak` integer by 1; a
+wrong repeat resets it to 0. When the streak reaches `MASTERED_THRESHOLD`
+(2) on a correct repeat, the `mastered` system label is auto-attached.
+Mastered words are excluded from the drill's salt (mastery-check) pool.
+`mastered` joins `RESERVED_LABEL_NAMES`, so `/label` and `/unlabel` reject
+it the same way they reject `remembered`.
 
 Spec lives in the latest `<!-- agent-plan v1 -->` comment on the issue.
 Mocking shape mirrors `tests/test_focus_hard_label.py` —
@@ -474,46 +475,52 @@ def test_record_outcome_game_wrong_no_streak_change(
     )
 
 
-# === AC7 — gm:repeat pool excludes mastered =================================
+# === AC7 — gm:drill salt pool excludes mastered ==============================
 
 
-def test_on_games_menu_gm_repeat_excludes_mastered(
+def test_on_games_menu_gm_drill_salt_excludes_mastered(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC7 — gm:repeat pool = remembered AND NOT mastered
+) -> None:  # AC7 — gm:drill salt pool = remembered AND NOT mastered
     _patch_bot(monkeypatch, conn)
-    # Seed 6 translatable words; all 6 marked remembered; 1 also marked mastered.
-    # Repeat runs typed_drill.REPEAT_ROUNDS (5) rounds — the un-mastered 5
-    # must be exactly the rounds.
-    words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    # Seed 5 translatable in-progress words (the focus pool), plus one plain
+    # `remembered` word (the only eligible mastery check) and one word that
+    # is `remembered` AND `mastered` (must be excluded from the salt pool).
+    # The draw is then fully determined: 5 focus rounds + 1 judged salt round.
+    focus_words = ["alpha", "beta", "gamma", "delta", "epsilon"]
+    words = focus_words + ["eta", "zeta"]
     vocab.ensure_chat(conn, CHAT)
     vocab.add_words_bulk(
         conn, CHAT, words, translations=[f"tr_{w}" for w in words]
     )
-    for w in words:
-        _mark_remembered(conn, w)
+    _mark_remembered(conn, "eta")  # eligible mastery check
+    _mark_remembered(conn, "zeta")
     _mark_mastered(conn, "zeta")  # mastered word that must be excluded
 
+    eta_id = _word_id(conn, "eta")
     zeta_id = _word_id(conn, "zeta")
-    expected_pool_ids = {_word_id(conn, w) for w in words if w != "zeta"}
+    focus_ids = {_word_id(conn, w) for w in focus_words}
 
-    update = _make_callback_update("gm:repeat")
+    update = _make_callback_update("gm:drill")
     asyncio.run(bot.on_games_menu(update, _make_context([])))
 
     game = bot.typed_drills.get(CHAT)
     assert game is not None, (
-        "AC7 — a viable post-exclusion pool (5 words) must start a repeat game"
-    )
-    assert game.kind == "repeat", (
-        f"AC7 — gm:repeat must store a kind='repeat' drill; got {game.kind!r}"
+        "AC7 — a viable 5-word focus pool must start a typed drill"
     )
     round_ids = {r.word_id for r in game.rounds}
     assert zeta_id not in round_ids, (
-        f"AC7 — `mastered` word_id={zeta_id} must NOT appear in the repeat "
-        f"pool; got rounds={round_ids!r}"
+        f"AC7 — `mastered` word_id={zeta_id} must NOT appear in the drill "
+        f"(excluded from the salt pool); got rounds={round_ids!r}"
     )
-    assert round_ids == expected_pool_ids, (
-        f"AC7 — repeat rounds must come from `remembered AND NOT mastered`; "
-        f"got {round_ids!r}, expected {expected_pool_ids!r}"
+    judged = [r for r in game.rounds if r.judged]
+    assert [r.word_id for r in judged] == [eta_id], (
+        f"AC7 — the judged mastery checks must come from `remembered AND NOT "
+        f"mastered` (only eta qualifies); got "
+        f"{[(r.word_id, r.judged) for r in game.rounds]!r}"
+    )
+    assert round_ids == focus_ids | {eta_id}, (
+        f"AC7 — rounds must be the 5 focus words plus the one eligible salt "
+        f"word; got {round_ids!r}, expected {focus_ids | {eta_id}!r}"
     )
 
 

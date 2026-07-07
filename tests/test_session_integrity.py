@@ -390,7 +390,7 @@ def test_games_menu_blocked_during_story(
 ) -> None:
     monkeypatch.setattr(bot, "conn", conn)
     bot.cloze_sessions[CHAT] = _session([(1, "horse")])
-    for data in ("gm:irr", "gm:repeat", "gm:focus", "gm:wt"):
+    for data in ("gm:irr", "gm:drill", "gm:wt", "gm:tw"):
         update = _make_callback_update(data)
         asyncio.run(bot.on_games_menu(update, _make_context()))
         assert (

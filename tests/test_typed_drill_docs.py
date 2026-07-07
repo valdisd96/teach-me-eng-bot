@@ -1,14 +1,15 @@
 """Tests for issue #129 — README + /help coverage of system labels and the
-Repeat (typed) game mode (now the kind="repeat" drill in `typed_drill.py`;
-this file was `test_repeat_game_docs.py` before the repeat_game/focus_drill
-merge).
+typed translation drill (now the single "Typed drill" `/games` button backed
+by `typed_drill.py`; this file was `test_repeat_game_docs.py` before the
+repeat_game/focus_drill merge, and the two buttons were later folded into
+one drill with salted `remembered` mastery checks).
 
 Spec lives in the latest `<!-- agent-plan v1 -->` comment on the issue. These
 are docs-tests — they read README.md and bot.py from disk as text rather than
 importing the module, so they assert what users actually see when grepping
-the repo for label names and streak rules. Repeat stays fixed at 5 rounds
-after the merge (`typed_drill.REPEAT_ROUNDS`), so the "5 rounds" doc
-assertion below is still the module truth.
+the repo for label names and streak rules. The drill runs up to
+`typed_drill.MAX_ROUNDS` (10) rounds, so the "10 rounds" doc assertion below
+is the module truth.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ def test_readme_documents_remembered_semantics() -> None:  # AC1(c) — remember
     assert "push" in section, "remembered semantics must reference pushes"
     assert "exclud" in section or "only" in section, (
         "remembered semantics must state it is excluded from the regular pool "
-        "(or that it is the only pool Repeat draws from)"
+        "(or that it is the only pool the drill's mastery checks draw from)"
     )
 
 
@@ -101,12 +102,13 @@ def test_readme_documents_focus_hard_semantics() -> None:  # AC1(c) — focus:ha
     assert boost_mentioned, (
         "`focus:hard` semantics must describe the 2× selection weight"
     )
-    # Auto-attached on a Repeat miss.
-    assert "repeat" in lower, (
-        "`focus:hard` semantics must reference the Repeat game as the trigger"
+    # Auto-attached on a missed Typed-drill mastery check.
+    assert "mastery check" in lower or "typed drill" in lower or "typed-drill" in lower, (
+        "`focus:hard` semantics must reference the Typed drill's mastery "
+        "checks as the trigger"
     )
     assert "miss" in lower or "wrong" in lower or "missed" in lower, (
-        "`focus:hard` semantics must say it attaches when a Repeat round is missed"
+        "`focus:hard` semantics must say it attaches when a mastery check is missed"
     )
 
 
@@ -136,15 +138,15 @@ def test_readme_streak_rule_has_four_literal_values() -> None:  # AC2, edge: lit
     )
 
 
-# --- AC3: /games row mentions the Repeat (typed) mode --------------------
+# --- AC3: /games row mentions the Typed drill mode ------------------------
 
 
-def test_readme_games_row_describes_repeat_typed_mode() -> None:  # AC3
+def test_readme_games_row_describes_typed_drill_mode() -> None:  # AC3
     row = _games_row(README_TEXT)
     lower = row.lower()
-    # All four signals the spec demands.
-    assert "5 rounds" in lower, (
-        f"/games row must state the Repeat mode runs `5 rounds`; row was:\n{row}"
+    # All five signals the merged single-button drill demands.
+    assert "10 rounds" in lower, (
+        f"/games row must state the Typed drill runs up to `10 rounds`; row was:\n{row}"
     )
     assert "typed" in lower, (
         f"/games row must call out a `typed` answer mode; row was:\n{row}"
@@ -153,23 +155,27 @@ def test_readme_games_row_describes_repeat_typed_mode() -> None:  # AC3
         f"/games row must mention `random direction` per round; row was:\n{row}"
     )
     assert "remembered" in lower, (
-        f"/games row must say the Repeat mode draws only over `remembered` "
-        f"words; row was:\n{row}"
+        f"/games row must say `remembered` words are salted into the drill "
+        f"as mastery checks; row was:\n{row}"
+    )
+    assert "mastery check" in lower, (
+        f"/games row must describe the salted rounds as mastery checks; "
+        f"row was:\n{row}"
     )
 
 
 # --- AC4: bot.py COMMANDS games entry ------------------------------------
 
 
-def test_bot_py_commands_games_mentions_repeat_and_remembered() -> None:  # AC4
+def test_bot_py_commands_games_mentions_typed_drill_and_remembered() -> None:  # AC4
     # Find the COMMANDS entry whose key is exactly "games".
     match = re.search(r'\(\s*"games"\s*,\s*"([^"]*)"\s*\)', BOT_PY_TEXT)
     assert match is not None, (
         "bot.py must contain a COMMANDS tuple keyed by \"games\""
     )
     desc = match.group(1)
-    assert "Repeat" in desc, (
-        f"COMMANDS[\"games\"] description must mention `Repeat`; got: {desc!r}"
+    assert "Typed drill" in desc, (
+        f"COMMANDS[\"games\"] description must mention `Typed drill`; got: {desc!r}"
     )
     assert "remembered" in desc, (
         f"COMMANDS[\"games\"] description must mention `remembered`; got: {desc!r}"
