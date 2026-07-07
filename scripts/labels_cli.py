@@ -30,16 +30,15 @@ import vocab  # noqa: E402
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--db", default=str(db.DEFAULT_DB_PATH), help="path to vocab.db"
-    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_dump = sub.add_parser("dump", help="emit unlabelled words + taxonomy as JSON")
-    p_dump.add_argument("--chat-id", type=int, required=True)
-
     p_apply = sub.add_parser("apply", help="attach a word→labels mapping")
-    p_apply.add_argument("--chat-id", type=int, required=True)
+    for p in (p_dump, p_apply):
+        p.add_argument("--chat-id", type=int, required=True)
+        p.add_argument(
+            "--db", default=str(db.DEFAULT_DB_PATH), help="path to vocab.db"
+        )
     p_apply.add_argument(
         "--file", required=True, help="JSON file mapping word → list of labels"
     )
