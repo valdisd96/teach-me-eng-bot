@@ -1,10 +1,16 @@
-"""Typed-answer "Repeat" mini-game for remembered-only words.
+"""Typed-answer translation drills: "Repeat" and "Focus drill".
 
-Drills the chat's `remembered`-labelled words by prompting the user to type
-the translation (either direction, chosen per round). Pure helpers — no
-telegram imports, no DB writes; `bot.py` wires the pool query, plain-text
-input routing, and end-of-session summary. Game state is per-chat and held
-only in process memory; a bot restart silently abandons in-flight games.
+One engine, two pools. ``kind="repeat"`` drills the chat's
+`remembered`-but-not-`mastered` words in a fixed ``REPEAT_ROUNDS`` rounds
+(bot.py grades it with the tolerant LLM judge and records
+``source="repeat"``, which drives the forget-flip / mastered machinery);
+``kind="focus"`` drills the `/focus`-scoped in-progress words for up to
+``MAX_FOCUS_ROUNDS`` rounds with strict grading and ``source="game"``.
+Everything here is pure except ``grade_answer_llm`` (one LLM call); no
+telegram imports, no DB writes — `bot.py` wires the pool queries,
+plain-text input routing, and the end-of-session summary. Game state is
+per-chat and held only in process memory; a bot restart silently abandons
+in-flight games.
 """
 
 from __future__ import annotations
@@ -16,8 +22,12 @@ from typing import Iterable, Literal
 import llm
 import prompts
 
-N_ROUNDS = 5
+REPEAT_ROUNDS = 5      # Repeat is always exactly this many rounds
+MIN_ROUNDS = 5         # smallest translatable pool either drill accepts
+MAX_FOCUS_ROUNDS = 10  # Focus drill scales with the pool up to this cap
+
 Direction = Literal["en2ru", "ru2en"]
+DrillKind = Literal["repeat", "focus"]
 
 
 @dataclass
@@ -32,6 +42,7 @@ class Round:
 class Game:
     chat_id: int
     rounds: list[Round]
+    kind: DrillKind = "focus"
     score: int = 0
     current_round: int = 0
     wrong: list[str] = field(default_factory=list)
@@ -66,28 +77,35 @@ def _row_view(row) -> tuple[int, str, str] | None:
 def draw_rounds(
     rows: Iterable,
     *,
-    n_rounds: int = N_ROUNDS,
+    n_max: int,
+    min_rounds: int = MIN_ROUNDS,
     rng: random.Random | None = None,
 ) -> list[Round]:
-    """Sample ``n_rounds`` rows and assign a random direction per round.
+    """Sample up to ``n_max`` translatable rows and pick a direction per round.
 
-    Rows whose translation is None/empty/whitespace are filtered first; if
-    fewer than ``n_rounds`` translatable rows remain (or ``n_rounds`` is
-    non-positive), ``ValueError`` is raised. Each round's direction is
-    chosen independently from ``rng``.
+    Rows whose translation is None/empty/whitespace are filtered first; the
+    surviving pool must contain at least ``min_rounds`` rows or ``ValueError``
+    is raised. The round count is ``min(n_max, len(pool))`` — with
+    ``n_max == min_rounds`` (Repeat) that is always exactly ``n_max``. Each
+    round's direction is chosen independently from ``rng``.
     """
-    if n_rounds <= 0:
-        raise ValueError(f"n_rounds must be positive, got {n_rounds}")
+    if min_rounds <= 0:
+        raise ValueError(f"min_rounds must be positive, got {min_rounds}")
+    if n_max < min_rounds:
+        raise ValueError(
+            f"n_max ({n_max}) must be >= min_rounds ({min_rounds})"
+        )
     rng = rng or random.Random()
     pool: list[tuple[int, str, str]] = []
     for r in rows:
         v = _row_view(r)
         if v is not None:
             pool.append(v)
-    if len(pool) < n_rounds:
+    if len(pool) < min_rounds:
         raise ValueError(
-            f"need at least {n_rounds} translatable rows, got {len(pool)}"
+            f"need at least {min_rounds} translatable rows, got {len(pool)}"
         )
+    n_rounds = min(n_max, len(pool))
     chosen = rng.sample(pool, n_rounds)
     out: list[Round] = []
     for wid, text, translation in chosen:

@@ -382,7 +382,7 @@ def test_games_menu_blocked_during_story(
             == bot.STORY_IN_PROGRESS
         ), f"{data} must be blocked during a story session"
     assert CHAT not in bot.irregulars
-    assert CHAT not in bot.repeat_games
+    assert CHAT not in bot.typed_drills
 
 
 # --- bot: stray text must not be graded --------------------------------------------
@@ -497,7 +497,7 @@ def test_deferred_session_waits_while_game_still_active(
     fired = AsyncMock()
     monkeypatch.setattr(bot, "dispatch_push", fired)
     bot.deferred_sessions.add(CHAT)
-    bot.repeat_games[CHAT] = MagicMock()
+    bot.typed_drills[CHAT] = MagicMock()
     asyncio.run(bot._fire_deferred_session(CHAT))
     fired.assert_not_awaited()
     assert CHAT in bot.deferred_sessions
