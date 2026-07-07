@@ -2,7 +2,8 @@
 
 Pushes and chat replies share one style rule: answers should be at most 1–2
 short paragraphs. Push prompts additionally require the target vocab word to
-appear literally (used by the scheduler's retry-once check).
+appear literally (used by the scheduler's retry-once check) and demand simple
+learner-level English so the word's meaning is guessable from the context.
 """
 
 from __future__ import annotations
@@ -12,16 +13,23 @@ import random
 TONES: tuple[str, ...] = ("funny", "motivational", "scary", "bright")
 
 _TONE_INSTRUCTIONS: dict[str, str] = {
-    "funny": "Write a playful, lightly absurd mini-scene. Make the reader smile.",
-    "motivational": "Write a warm, sincere micro-pep-talk.",
-    "scary": "Write a brief, eerie moment — atmospheric dread, not gore.",
-    "bright": "Write a vivid, sensory, sunlit snapshot full of small wonders.",
+    "funny": "Write a playful everyday moment with one light joke.",
+    "motivational": "Write a warm, encouraging line, like a friendly coach.",
+    "scary": "Write a slightly spooky everyday moment — mild, not graphic.",
+    "bright": "Write a cheerful, concrete everyday scene.",
 }
 
 _PUSH_SYSTEM = (
-    "You write tiny English snippets that use a given vocabulary word naturally. "
-    "Keep it to 1–2 short sentences, at most 2 short paragraphs. "
-    "The word MUST appear literally in your reply (same spelling, case-insensitive). "
+    "You write one tiny English snippet that helps a learner understand a "
+    "given vocabulary word. "
+    "The target word MUST appear literally in your reply (same spelling, "
+    "case-insensitive) — never replace it with a synonym, even if it is rare "
+    "or advanced. "
+    "Around it, use simple, everyday English (CEFR A2–B1 level): only common, "
+    "easy words and plain grammar. "
+    "Keep it to 1–2 short sentences, at most 25 words total. "
+    "Build the snippet around a clear, concrete situation so that someone who "
+    "has never seen the target word can guess its meaning from the context. "
     "No headings, no quotes, no explanation — just the snippet."
 )
 
@@ -70,7 +78,13 @@ def push_messages(
             "role": "system",
             "content": f"{_PUSH_SYSTEM}\n{_TONE_INSTRUCTIONS[resolved]}",
         },
-        {"role": "user", "content": f"Word to use: {word}"},
+        {
+            "role": "user",
+            "content": (
+                f"Word to use: {word}\n"
+                f'Remember: the exact word "{word}" must appear in the snippet.'
+            ),
+        },
     ]
 
 

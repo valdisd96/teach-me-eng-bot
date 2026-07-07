@@ -37,15 +37,26 @@ def test_push_messages_mixed_tone_uses_rng() -> None:
     msgs = prompts.push_messages("placid", "mixed", rng=random.Random(0))
     # The system prompt contains one of the concrete tone instructions.
     sys = msgs[0]["content"]
-    assert any(
-        snippet[:20] in sys
-        for snippet in [
-            "Write a playful",
-            "Write a warm",
-            "Write a brief, eerie",
-            "Write a vivid",
-        ]
-    )
+    assert any(instr in sys for instr in prompts._TONE_INSTRUCTIONS.values())
+
+
+def test_push_messages_demand_simple_learner_english() -> None:
+    # Pushes must steer toward plain, predictable learner-level snippets whose
+    # context makes the target word's meaning guessable.
+    sys = prompts.push_messages("ephemeral", "funny")[0]["content"].lower()
+    assert "simple, everyday english" in sys
+    assert "a2" in sys
+    assert "guess its meaning from the context" in sys
+    assert "25 words" in sys
+
+
+def test_tone_instructions_stay_plain() -> None:
+    # Tone flavour must not reintroduce florid prose — every instruction is
+    # anchored in an everyday register or an explicitly plain style.
+    for tone, instr in prompts._TONE_INSTRUCTIONS.items():
+        assert "everyday" in instr or "friendly" in instr, (
+            f"tone {tone!r} instruction drifted from plain style: {instr!r}"
+        )
 
 
 def test_explain_messages_has_system_and_user_with_word() -> None:

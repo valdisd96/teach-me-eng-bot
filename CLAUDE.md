@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A Telegram English-tutor bot. Users add vocabulary with `/add`; the bot sends FSRS-scheduled push messages that use those words in short tone-flavoured snippets, with ✅ knew / ❌ forgot buttons that update each word's FSRS state. Plain chat messages stream live replies from any OpenAI-compatible chat-completions endpoint with the chat's vocab injected as soft hints.
+A Telegram English-tutor bot. Users add vocabulary with `/add`; the bot sends FSRS-scheduled push messages that use those words in short tone-flavoured snippets written in simple learner-level English (the context is designed to make the word's meaning guessable), with ✅ knew / ❌ forgot buttons that update each word's FSRS state. Plain chat messages stream live replies from any OpenAI-compatible chat-completions endpoint with the chat's vocab injected as soft hints.
 
 ## Setup
 
@@ -66,7 +66,7 @@ Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are
 
 Plain (non-slash) messages go through the **just-talk** flow: the chat history is passed to the model with the current vocab list injected into the system prompt as soft hints. Any vocab words that appear literally in the reply bump `mention_count` and update `last_used_at`.
 
-Scheduled **pushes** send 1 short snippet using 1 vocab word at a time, in the chosen tone. Each push message has `✅ knew / ❌ forgot` buttons; tapping either applies the corresponding FSRS rating (`Good` / `Again`).
+Scheduled **pushes** send 1 short snippet using 1 vocab word at a time, in the chosen tone. Snippets are constrained to simple everyday English (CEFR A2–B1, ≤ 25 words) built around a concrete situation, so the target word's meaning can be guessed from context. Each push message has `✅ knew / ❌ forgot` buttons; tapping either applies the corresponding FSRS rating (`Good` / `Again`).
 
 Every `INTRO_EVERY`-th push of a chat's local day (the 1st, 4th, 7th, … — counted from `push_log`) is an **introduction slot**: it draws from the introduction pool — words with fewer than `INTRO_GRADUATION_REPS` (2) FSRS ratings, `remembered` excluded — and **bypasses the `/focus` filter**, so a freshly `/add`-ed unlabelled word is guaranteed exposure while still fresh in memory. Introduction pushes carry a 🆕 badge in the header. Once a word has been rated twice it graduates into the regular pool and normal focus rules apply. An intro slot with an empty introduction pool falls back to the regular focus-scoped selection.
 
