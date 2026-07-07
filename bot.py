@@ -266,6 +266,17 @@ def _chunk_lines(lines: list[str], max_len: int, header: str) -> list[str]:
 # --- push dispatch (called by the scheduler) --------------------------------
 
 
+async def _push_llm_chat(messages: list[dict]) -> str:
+    """llm.chat with reasoning disabled, for push/explain snippets.
+
+    The openrouter/free auto-router sometimes lands on reasoning models whose
+    chain-of-thought either eats the small max_tokens budget (content: null)
+    or is returned as the content itself, leaking "We need to insert the
+    word..." traces into user-facing pushes. Same class of bug as #100.
+    """
+    return await llm.chat(messages, disable_reasoning=True)
+
+
 async def dispatch_push(chat_id: int) -> None:
     """Compose a scheduled push and send it with rating buttons."""
     assert conn is not None and app is not None
@@ -274,7 +285,7 @@ async def dispatch_push(chat_id: int) -> None:
     names = names or None
     try:
         composed = await sched_module.compose_push(
-            conn, chat_id, llm_chat=llm.chat,
+            conn, chat_id, llm_chat=_push_llm_chat,
             names=names, mode=mode, rng=random.Random(),
         )
     except Exception as e:  # noqa: BLE001 — never let a push crash the scheduler
@@ -1153,7 +1164,7 @@ async def on_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         explanation = await sched_module.compose_explanation(
-            conn, word_id, llm_chat=llm.chat
+            conn, word_id, llm_chat=_push_llm_chat
         )
     except Exception as e:  # noqa: BLE001 — a failed explain shouldn't break rating
         log.error("explain failed for word %s: %s", word_id, e)
