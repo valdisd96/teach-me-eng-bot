@@ -6,23 +6,19 @@ routed to OpenRouter instead (the production backend). Both speak the same
 OpenAI SSE/JSON dialect, so the parsing helpers don't branch.
 
 Entry points:
-  * `stream_chat(messages)` — async generator yielding token deltas for live
-    Telegram message edits.
-  * `chat(messages)` — non-streaming one-shot, used by the push scheduler where
-    we wait for the full reply before sending.
+  * `chat(messages)` — one-shot completion used by just-talk replies, the
+    daily story composer, and the drill judge.
   * `health()` — status string for /status.
   * `usage()` — single-line backend usage / quota summary for /status.
 
-SSE parsing and non-stream response parsing are factored into pure helpers so
-they can be unit-tested without standing up an HTTP mock.
+Response parsing is factored into a pure helper so it can be unit-tested
+without standing up an HTTP mock.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
-from typing import AsyncIterator
 
 import httpx
 
@@ -35,9 +31,6 @@ MODEL = "gemma4"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_AUTH_KEY_URL = "https://openrouter.ai/api/v1/auth/key"
 DEFAULT_OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"
-
-_DONE = "[DONE]"
-
 
 @dataclass(frozen=True)
 class Backend:
@@ -71,53 +64,11 @@ def _get_backend() -> Backend:
     )
 
 
-def _parse_sse_delta(raw: str) -> str | None:
-    """Return the content delta from one SSE line, or None to skip/terminate."""
-    if not raw.startswith("data:"):
-        return None
-    payload = raw[5:].strip()
-    if not payload or payload == _DONE:
-        return None
-    try:
-        chunk = json.loads(payload)
-        return chunk["choices"][0]["delta"].get("content") or None
-    except (json.JSONDecodeError, KeyError, IndexError):
-        return None
-
-
 def _parse_completion(payload: dict) -> str:
     # Some models (e.g. reasoning-only on the openrouter/free auto-router)
     # return content: null on a 200; treat that the same as empty so callers
     # always get a string.
     return payload["choices"][0]["message"].get("content") or ""
-
-
-async def stream_chat(
-    messages: list[dict],
-    *,
-    max_tokens: int = 1024,
-    temperature: float = 0.7,
-) -> AsyncIterator[str]:
-    """Stream token deltas from the configured backend as they arrive."""
-    backend = _get_backend()
-    async with httpx.AsyncClient(timeout=180) as client:
-        async with client.stream(
-            "POST",
-            backend.url,
-            headers=backend.headers,
-            json={
-                "model": backend.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": True,
-            },
-        ) as resp:
-            resp.raise_for_status()
-            async for raw in resp.aiter_lines():
-                delta = _parse_sse_delta(raw)
-                if delta:
-                    yield delta
 
 
 async def chat(
