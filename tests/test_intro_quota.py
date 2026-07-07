@@ -1,18 +1,19 @@
 """Tests for the new-word introduction quota.
 
 Words with fewer than `vocab.INTRO_GRADUATION_REPS` FSRS ratings form the
-introduction pool. Every `scheduler.INTRO_EVERY`-th push of a chat's local
-day is an introduction slot that draws from that pool while bypassing the
-/focus label filter — so a freshly `/add`-ed unlabelled word is guaranteed
-exposure even under an active focus. Covered here:
+introduction pool. `vocab.select_session_words` seeds up to
+`cloze.MAX_INTRO_WORDS` of them into each daily cloze-story session while
+bypassing the /focus label filter — so a freshly `/add`-ed unlabelled word
+is guaranteed exposure even under an active focus. Covered here:
 
 - `vocab.select_intro_word` pool membership (reps cutoff, remembered
   exclusion, empty pool, deterministic sampling).
-- `scheduler.is_intro_slot` cadence derived from push_log (same local day
-  only, per-chat).
-- `scheduler.compose_push` wiring: focus bypass + `is_intro` flag on intro
-  slots, fallback to the focus-scoped pool once the intro pool is empty.
-- `vocab.format_push_body` 🆕 badge.
+- `vocab.select_session_words` wiring: intro seeding + focus bypass, focus
+  scoping of the regular picks, fallback when the intro pool is empty,
+  no duplicates, sub-`n` results on small pools.
+- `scheduler.compose_session` marks intro words so the session message can
+  badge them 🆕.
+- `vocab.format_push_body` 🆕 badge (still used by the ❌-miss explain reply).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import datetime
 import random
 import sqlite3
 
+import cloze
 import config_flow
 import scheduler
 import vocab
@@ -50,14 +52,6 @@ def _set_reps(conn: sqlite3.Connection, text: str, reps: int) -> None:
     conn.execute(
         "UPDATE words SET reps = ? WHERE chat_id = ? AND text = ?",
         (reps, CHAT, text),
-    )
-
-
-def _log_push_at(conn: sqlite3.Connection, sent_at: str, chat_id: int = CHAT) -> None:
-    conn.execute(
-        "INSERT INTO push_log(chat_id, sent_at, tg_message_id, word_ids_json) "
-        "VALUES (?, ?, NULL, '[]')",
-        (chat_id, sent_at),
     )
 
 
@@ -91,7 +85,7 @@ def test_select_intro_word_excludes_remembered(conn: sqlite3.Connection) -> None
     for seed in range(10):
         row = vocab.select_intro_word(conn, CHAT, rng=random.Random(seed), now=NOW)
         assert row is not None and row["text"] == "fresh", (
-            "remembered words must not resurface through introduction slots"
+            "remembered words must not resurface through introduction seeding"
         )
 
 
@@ -119,49 +113,12 @@ def test_select_intro_word_is_deterministic_with_seeded_rng(
     assert first["id"] == second["id"]
 
 
-# --- scheduler.is_intro_slot ---------------------------------------------------
+# --- vocab.select_session_words -------------------------------------------------
 
 
-def test_intro_slot_cadence_every_third_push(conn: sqlite3.Connection) -> None:
-    _seed_chat(conn)
-    expected = [True, False, False, True, False, False]
-    for i, want in enumerate(expected):
-        got = scheduler.is_intro_slot(conn, CHAT, "UTC", now=NOW)
-        assert got is want, f"push #{i} of the day: expected intro={want}"
-        _log_push_at(conn, "2026-07-07 12:00:00")
-
-
-def test_intro_slot_ignores_previous_days_and_other_chats(
+def test_session_words_seed_intro_words_bypassing_focus(
     conn: sqlite3.Connection,
 ) -> None:
-    _seed_chat(conn)
-    vocab.ensure_chat(conn, CHAT + 1)
-    _log_push_at(conn, "2026-07-06 18:00:00")  # yesterday (UTC)
-    _log_push_at(conn, "2026-07-07 10:00:00", chat_id=CHAT + 1)  # other chat
-    assert scheduler.is_intro_slot(conn, CHAT, "UTC", now=NOW) is True
-
-    _log_push_at(conn, "2026-07-07 10:00:00")
-    assert scheduler.is_intro_slot(conn, CHAT, "UTC", now=NOW) is False
-
-
-def test_intro_slot_counts_from_local_midnight(conn: sqlite3.Connection) -> None:
-    _seed_chat(conn, tz="Asia/Tokyo")
-    # 20:00 UTC on Jul 6 is already Jul 7 05:00 in Tokyo — it counts as today.
-    _log_push_at(conn, "2026-07-06 20:00:00")
-    assert scheduler.is_intro_slot(conn, CHAT, "Asia/Tokyo", now=NOW) is False
-    # …but it would NOT count for a UTC chat.
-    assert scheduler.is_intro_slot(conn, CHAT, "UTC", now=NOW) is True
-
-
-# --- scheduler.compose_push wiring ---------------------------------------------
-
-
-async def _llm_echo(msgs: list[dict]) -> str:
-    # Echo the target word back so compose_push never burns its retry.
-    return msgs[-1]["content"]
-
-
-def test_intro_slot_bypasses_focus_filter(conn: sqlite3.Connection) -> None:
     _seed_chat(conn)
     vocab.add_word(conn, CHAT, "fresh")  # unlabelled, reps=0
     vocab.add_word(conn, CHAT, "labelled")
@@ -169,64 +126,107 @@ def test_intro_slot_bypasses_focus_filter(conn: sqlite3.Connection) -> None:
     label_id = vocab.get_or_create_label(conn, CHAT, "pos:noun")
     vocab.attach_label(conn, _word_id(conn, "labelled"), label_id)
 
-    out = asyncio.run(
-        scheduler.compose_push(
-            conn, CHAT, llm_chat=_llm_echo,
-            names=["pos:noun"], rng=random.Random(0), now=NOW,
-        )
+    rows = vocab.select_session_words(
+        conn, CHAT, 5, names=["pos:noun"], rng=random.Random(0), now=NOW
     )
-    assert out is not None
-    word_id, word, _, is_intro = out
-    assert word == "fresh", (
-        "the introduction slot must draw the unlabelled new word despite the "
-        f"focus filter; got {word!r}"
+    texts = [r["text"] for r in rows]
+    assert texts[0] == "fresh", (
+        "the introduction seed must draw the unlabelled new word despite the "
+        f"focus filter, and it comes first; got {texts!r}"
     )
-    assert is_intro is True
-    assert word_id == _word_id(conn, "fresh")
+    assert "labelled" in texts, "regular picks fill the remaining slots"
 
 
-def test_non_intro_slot_respects_focus_filter(conn: sqlite3.Connection) -> None:
-    _seed_chat(conn)
-    vocab.add_word(conn, CHAT, "fresh")  # unlabelled, reps=0
-    vocab.add_word(conn, CHAT, "labelled")
-    _set_reps(conn, "labelled", vocab.INTRO_GRADUATION_REPS)
-    label_id = vocab.get_or_create_label(conn, CHAT, "pos:noun")
-    vocab.attach_label(conn, _word_id(conn, "labelled"), label_id)
-    _log_push_at(conn, "2026-07-07 10:00:00")  # push #1 sent → next is not intro
-
-    out = asyncio.run(
-        scheduler.compose_push(
-            conn, CHAT, llm_chat=_llm_echo,
-            names=["pos:noun"], rng=random.Random(0), now=NOW,
-        )
-    )
-    assert out is not None
-    _, word, _, is_intro = out
-    assert word == "labelled", "regular slots keep the focus-scoped pool"
-    assert is_intro is False
-
-
-def test_intro_slot_falls_back_to_focus_pool_when_intro_pool_empty(
+def test_session_words_regular_picks_respect_focus(
     conn: sqlite3.Connection,
 ) -> None:
     _seed_chat(conn)
     vocab.add_word(conn, CHAT, "labelled")
+    vocab.add_word(conn, CHAT, "outside")
     _set_reps(conn, "labelled", vocab.INTRO_GRADUATION_REPS)
+    _set_reps(conn, "outside", vocab.INTRO_GRADUATION_REPS)
     label_id = vocab.get_or_create_label(conn, CHAT, "pos:noun")
     vocab.attach_label(conn, _word_id(conn, "labelled"), label_id)
 
-    out = asyncio.run(
-        scheduler.compose_push(
-            conn, CHAT, llm_chat=_llm_echo,
-            names=["pos:noun"], rng=random.Random(0), now=NOW,
+    rows = vocab.select_session_words(
+        conn, CHAT, 5, names=["pos:noun"], rng=random.Random(0), now=NOW
+    )
+    assert [r["text"] for r in rows] == ["labelled"], (
+        "with an empty introduction pool, only focus-matching words may be "
+        f"selected; got {[r['text'] for r in rows]!r}"
+    )
+
+
+def test_session_words_cap_intro_seeds(conn: sqlite3.Connection) -> None:
+    _seed_chat(conn)
+    for w in ("alpha", "beta", "gamma", "delta"):
+        vocab.add_word(conn, CHAT, w)  # all reps=0 → all intro-phase
+
+    rows = vocab.select_session_words(
+        conn, CHAT, 3, max_intro=2, rng=random.Random(0), now=NOW
+    )
+    # All four are also in the regular (unfiltered) pool, so the session still
+    # fills up to n — but at most max_intro come from the intro-first draw.
+    assert len(rows) == 3
+    assert len({r["id"] for r in rows}) == 3, "no duplicate words in a session"
+
+
+def test_session_words_fewer_than_n_on_small_pool(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "solo")
+    rows = vocab.select_session_words(
+        conn, CHAT, 8, rng=random.Random(0), now=NOW
+    )
+    assert [r["text"] for r in rows] == ["solo"]
+
+
+def test_session_words_exclude_remembered(conn: sqlite3.Connection) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "fresh")
+    vocab.add_word(conn, CHAT, "known")
+    _set_reps(conn, "known", vocab.INTRO_GRADUATION_REPS)
+    label_id = vocab.get_or_create_label(conn, CHAT, vocab.REMEMBERED_LABEL)
+    vocab.attach_label(conn, _word_id(conn, "known"), label_id)
+
+    rows = vocab.select_session_words(
+        conn, CHAT, 5, rng=random.Random(0), now=NOW
+    )
+    assert [r["text"] for r in rows] == ["fresh"]
+
+
+def test_session_words_empty_vocab_returns_empty(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_chat(conn)
+    assert vocab.select_session_words(conn, CHAT, 5, now=NOW) == []
+
+
+# --- scheduler.compose_session intro badge ---------------------------------------
+
+
+def test_compose_session_intro_flag_drives_new_word_section(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "fresh")  # reps=0 → intro
+    vocab.add_word(conn, CHAT, "veteran")
+    _set_reps(conn, "veteran", vocab.INTRO_GRADUATION_REPS)
+
+    async def llm_ok(msgs):
+        return "The fresh bread pleased the veteran baker."
+
+    session = asyncio.run(
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_ok, n_words=5, rng=random.Random(0), now=NOW
         )
     )
-    assert out is not None
-    _, word, _, is_intro = out
-    assert word == "labelled", (
-        "an intro slot with an empty introduction pool must not drop the push"
-    )
-    assert is_intro is False
+    assert session is not None
+    flags = {b.word: b.is_intro for b in session.blanks}
+    assert flags == {"fresh": True, "veteran": False}
+    body = cloze.format_session_message(session, rng=random.Random(0))
+    assert "🆕" in body and "fresh" in body
 
 
 # --- vocab.format_push_body badge ----------------------------------------------

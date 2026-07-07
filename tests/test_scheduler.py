@@ -145,7 +145,7 @@ def test_plan_is_deterministic_with_seeded_rng() -> None:
     assert a == b
 
 
-# --- compose_push ------------------------------------------------------------
+# --- compose_session ---------------------------------------------------------
 
 
 def _seed_chat(conn: sqlite3.Connection, tone: str = "funny") -> None:
@@ -156,51 +156,58 @@ def _seed_chat(conn: sqlite3.Connection, tone: str = "funny") -> None:
     )
 
 
-def test_compose_push_returns_none_if_chat_missing(conn: sqlite3.Connection) -> None:
+def test_compose_session_returns_none_if_chat_missing(conn: sqlite3.Connection) -> None:
     async def llm_fail(msgs):  # should never be called
         raise AssertionError("llm should not be called")
 
     out = asyncio.run(
-        scheduler.compose_push(conn, CHAT, llm_chat=llm_fail)
+        scheduler.compose_session(conn, CHAT, llm_chat=llm_fail, n_words=5)
     )
     assert out is None
 
 
-def test_compose_push_returns_none_if_no_words(conn: sqlite3.Connection) -> None:
+def test_compose_session_returns_none_if_no_words(conn: sqlite3.Connection) -> None:
     _seed_chat(conn)
 
     async def llm_fail(msgs):
         raise AssertionError("llm should not be called")
 
     out = asyncio.run(
-        scheduler.compose_push(conn, CHAT, llm_chat=llm_fail)
+        scheduler.compose_session(conn, CHAT, llm_chat=llm_fail, n_words=5)
     )
     assert out is None
 
 
-def test_compose_push_returns_word_and_text_on_first_try(conn: sqlite3.Connection) -> None:
+def test_compose_session_blanks_every_word_on_first_try(
+    conn: sqlite3.Connection,
+) -> None:
     _seed_chat(conn)
     vocab.add_word(conn, CHAT, "ephemeral")
+    vocab.add_word(conn, CHAT, "placid")
 
     calls: list[list[dict]] = []
 
     async def llm_ok(msgs):
         calls.append(msgs)
-        return "An ephemeral breeze stirred the page."
+        return "The ephemeral mist settled over the placid lake."
 
     out = asyncio.run(
-        scheduler.compose_push(
-            conn, CHAT, llm_chat=llm_ok, rng=random.Random(0)
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_ok, n_words=5, rng=random.Random(0)
         )
     )
     assert out is not None
-    _, word, text, _ = out
-    assert word == "ephemeral"
-    assert "ephemeral" in text.lower()
     assert len(calls) == 1
+    assert {b.word for b in out.blanks} == {"ephemeral", "placid"}
+    assert "___(1)" in out.display and "___(2)" in out.display
+    assert "ephemeral" not in out.display and "placid" not in out.display
+    # Raw story is kept for the end-of-session reveal.
+    assert "ephemeral" in out.story
 
 
-def test_compose_push_retries_when_word_missing(conn: sqlite3.Connection) -> None:
+def test_compose_session_retries_when_word_missing(
+    conn: sqlite3.Connection,
+) -> None:
     _seed_chat(conn)
     vocab.add_word(conn, CHAT, "ephemeral")
 
@@ -209,22 +216,42 @@ def test_compose_push_retries_when_word_missing(conn: sqlite3.Connection) -> Non
     async def llm_flaky(msgs):
         calls.append(msgs)
         if len(calls) == 1:
-            return "Nothing to see here."  # word missing → should retry
+            return "Nothing to see here."  # word missing -> should retry
         return "The ephemeral mist lingered."
 
     out = asyncio.run(
-        scheduler.compose_push(
-            conn, CHAT, llm_chat=llm_flaky, rng=random.Random(0)
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_flaky, n_words=5, rng=random.Random(0)
         )
     )
     assert out is not None
-    _, word, text, _ = out
-    assert word == "ephemeral"
-    assert "ephemeral" in text.lower()
+    assert [b.word for b in out.blanks] == ["ephemeral"]
     assert len(calls) == 2
 
 
-def test_compose_push_returns_anyway_after_retries(conn: sqlite3.Connection) -> None:
+def test_compose_session_drops_still_missing_words(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "ephemeral")
+    vocab.add_word(conn, CHAT, "placid")
+
+    async def llm_partial(msgs):
+        return "The ephemeral mist lingered."  # placid never appears
+
+    out = asyncio.run(
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_partial, n_words=5, rng=random.Random(0)
+        )
+    )
+    # With retries=1 we try twice, then drop the missing word and keep going.
+    assert out is not None
+    assert [b.word for b in out.blanks] == ["ephemeral"]
+
+
+def test_compose_session_returns_none_when_no_word_lands(
+    conn: sqlite3.Connection,
+) -> None:
     _seed_chat(conn)
     vocab.add_word(conn, CHAT, "ephemeral")
 
@@ -232,15 +259,27 @@ def test_compose_push_returns_anyway_after_retries(conn: sqlite3.Connection) -> 
         return "completely off-topic reply"
 
     out = asyncio.run(
-        scheduler.compose_push(
-            conn, CHAT, llm_chat=llm_bad, rng=random.Random(0)
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_bad, n_words=5, rng=random.Random(0)
         )
     )
-    # With retries=1 we try 2 times and still return.
+    assert out is None
+
+
+def test_compose_session_marks_intro_words(conn: sqlite3.Connection) -> None:
+    _seed_chat(conn)
+    vocab.add_word(conn, CHAT, "ephemeral")  # reps=0 -> intro phase
+
+    async def llm_ok(msgs):
+        return "The ephemeral mist lingered."
+
+    out = asyncio.run(
+        scheduler.compose_session(
+            conn, CHAT, llm_chat=llm_ok, n_words=5, rng=random.Random(0)
+        )
+    )
     assert out is not None
-    _, word, text, _ = out
-    assert word == "ephemeral"
-    assert "ephemeral" not in text.lower()
+    assert out.blanks[0].is_intro is True
 
 
 # --- compose_explanation -----------------------------------------------------

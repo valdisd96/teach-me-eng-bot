@@ -59,6 +59,30 @@ def test_tone_instructions_stay_plain() -> None:
         )
 
 
+def test_story_messages_lists_every_word_and_demands_literal_use() -> None:
+    words = ["ephemeral", "to run out of", "placid"]
+    msgs = prompts.story_messages(words, "funny", rng=random.Random(0))
+    assert [m["role"] for m in msgs] == ["system", "user"]
+    for w in words:
+        assert w in msgs[1]["content"]
+    sys = msgs[0]["content"].lower()
+    assert "exactly once" in sys
+    assert "literally" in sys
+    assert "simple, everyday english" in sys
+    assert "guessed from the context" in sys
+
+
+def test_story_messages_include_tone_instruction() -> None:
+    msgs = prompts.story_messages(["alpha"], "mixed", rng=random.Random(0))
+    sys = msgs[0]["content"]
+    assert any(instr in sys for instr in prompts._TONE_INSTRUCTIONS.values())
+
+
+def test_story_messages_reject_unknown_tone() -> None:
+    with pytest.raises(ValueError):
+        prompts.story_messages(["alpha"], "whimsical")
+
+
 def test_explain_messages_has_system_and_user_with_word() -> None:
     msgs = prompts.explain_messages("ephemeral")
     assert [m["role"] for m in msgs] == ["system", "user"]

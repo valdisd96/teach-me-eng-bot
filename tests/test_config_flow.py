@@ -22,17 +22,17 @@ def test_validate_tz_rejects_unknown() -> None:
         config_flow.validate_tz("Middle/Earth")
 
 
-def test_validate_pushes_accepts_range() -> None:
-    for n in range(config_flow.MIN_PUSHES, config_flow.MAX_PUSHES + 1):
-        assert config_flow.validate_pushes(str(n)) == n
+def test_validate_words_accepts_range() -> None:
+    for n in range(config_flow.MIN_WORDS, config_flow.MAX_WORDS + 1):
+        assert config_flow.validate_words(str(n)) == n
 
 
-def test_validate_pushes_rejects_out_of_range() -> None:
-    below = str(config_flow.MIN_PUSHES - 1)
-    above = str(config_flow.MAX_PUSHES + 1)
+def test_validate_words_rejects_out_of_range() -> None:
+    below = str(config_flow.MIN_WORDS - 1)
+    above = str(config_flow.MAX_WORDS + 1)
     for bad in (below, above, "0", "-1", "lots"):
         with pytest.raises(ValueError):
-            config_flow.validate_pushes(bad)
+            config_flow.validate_words(bad)
 
 
 def test_validate_hhmm_normalizes_to_two_digits() -> None:
@@ -72,7 +72,7 @@ def test_session_completes_with_valid_replies() -> None:
     assert s.done is True
     settings = s.settings()
     assert settings.tz == "Europe/Warsaw"
-    assert settings.pushes_per_day == 7
+    assert settings.words_per_day == 7
     assert settings.active_start == "09:00"
     assert settings.active_end == "21:00"
     assert settings.tone == "mixed"
@@ -122,7 +122,7 @@ def test_session_submit_after_done_is_noop() -> None:
 def test_save_and_load_settings_roundtrip(conn: sqlite3.Connection) -> None:
     s = config_flow.Settings(
         tz="UTC",
-        pushes_per_day=4,
+        words_per_day=4,
         active_start="08:00",
         active_end="22:00",
         tone="funny",

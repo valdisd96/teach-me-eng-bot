@@ -42,6 +42,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
+import cloze as cloze_module
 import config_flow
 import db as db_module
 import focus_drill as focus_drill_module
@@ -135,6 +136,9 @@ irregulars: dict[int, irregular_module.Game] = {}
 repeat_games: dict[int, repeat_module.Game] = {}
 # In-flight "Focus drill (typed)" sessions: same one-per-chat semantics.
 focus_drills: dict[int, focus_drill_module.Game] = {}
+# In-flight daily cloze-story sessions: one per chat, replaced by the next
+# day's dispatch and cleared on completion, /games cancel, or bot restart.
+cloze_sessions: dict[int, cloze_module.Session] = {}
 # Label spec captured between `/games <spec>` (or focus seed via on_play_game)
 # and the direction-picker tap, as `(mode, names)` so OR-mode focus survives the
 # round-trip. Missing entry means "no filter". Latest write wins; popped on game start.
@@ -278,55 +282,59 @@ async def _push_llm_chat(messages: list[dict]) -> str:
 
 
 async def dispatch_push(chat_id: int) -> None:
-    """Compose a scheduled push and send it with rating buttons."""
+    """Compose the daily cloze-story session and send its opening message."""
     assert conn is not None and app is not None
+    settings = config_flow.load_settings(conn, chat_id)
+    if settings is None:
+        log.info("No session for chat %s (chat unconfigured)", chat_id)
+        return
     focus_text = vocab.get_focus_spec(conn, chat_id)
     mode, names = vocab.split_focus_spec(focus_text)
     names = names or None
     try:
-        composed = await sched_module.compose_push(
+        # Clamp for rows configured under the old 6-12 pushes/day range —
+        # a 12-word story overwhelms both the learner and the free model.
+        n_words = min(settings.words_per_day, config_flow.MAX_WORDS)
+        session = await sched_module.compose_session(
             conn, chat_id, llm_chat=_push_llm_chat,
+            n_words=n_words,
             names=names, mode=mode, rng=random.Random(),
         )
-    except Exception as e:  # noqa: BLE001 — never let a push crash the scheduler
-        log.error("compose_push failed for chat %s: %s", chat_id, e)
+    except Exception as e:  # noqa: BLE001 — never let a session crash the scheduler
+        log.error("compose_session failed for chat %s: %s", chat_id, e)
         return
-    if composed is None:
-        if names:
-            log.info(
-                "No push for chat %s (focus %r matched zero words)",
-                chat_id, focus_text,
-            )
-        else:
-            log.info("No push for chat %s (no vocab or chat missing)", chat_id)
+    if session is None:
+        log.info(
+            "No session for chat %s (no vocab%s)",
+            chat_id,
+            f" under focus {focus_text!r}" if names else "",
+        )
         return
-    word_id, word, text, is_intro = composed
 
-    # Insert push_log first so the callback_data can reference a real push id;
+    # Insert push_log first so the session can reference a real push id;
     # update tg_message_id after the Telegram send returns.
-    push_id = sched_module.log_push(conn, chat_id, tg_message_id=None, word_ids=[word_id])
-    kb = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(
-                "✅ knew", callback_data=f"rate:good:{push_id}:{word_id}"
-            ),
-            InlineKeyboardButton(
-                "❌ forgot", callback_data=f"rate:again:{push_id}:{word_id}"
-            ),
-        ]]
+    push_id = sched_module.log_push(
+        conn, chat_id, tg_message_id=None,
+        word_ids=[b.word_id for b in session.blanks],
     )
-    formatted = vocab.format_push_body(word, text, intro=is_intro)
+    session.push_id = push_id
+    body = cloze_module.format_session_message(session)
     try:
         msg = await app.bot.send_message(
-            chat_id=chat_id, text=formatted, reply_markup=kb, parse_mode="HTML"
+            chat_id=chat_id, text=body, parse_mode="HTML"
         )
         conn.execute(
             "UPDATE push_log SET tg_message_id = ? WHERE id = ?",
             (msg.message_id, push_id),
         )
-        append_turn(chat_id, "push", f"[{word}] {text}")
+        cloze_sessions[chat_id] = session
+        append_turn(
+            chat_id,
+            "push",
+            f"[story: {', '.join(b.word for b in session.blanks)}] {session.story}",
+        )
     except Exception as e:  # noqa: BLE001
-        log.error("Failed to send push to chat %s: %s", chat_id, e)
+        log.error("Failed to send session to chat %s: %s", chat_id, e)
 
 
 # --- command handlers -------------------------------------------------------
@@ -334,7 +342,7 @@ async def dispatch_push(chat_id: int) -> None:
 
 # Single source of truth for commands — used by /help and set_my_commands.
 COMMANDS: list[tuple[str, str]] = [
-    ("start", "Configure schedule: timezone, pushes/day, active window, tone, target language"),
+    ("start", "Configure schedule: timezone, words per daily story, active window, tone, target language"),
     ("help", "Show this help message"),
     ("add", "Add a word or phrase to this chat's vocab"),
     ("remove", "Remove a word or phrase from vocab"),
@@ -343,7 +351,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download this chat's vocab as a CSV file"),
     ("resetvocab", "Wipe this chat's vocabulary (with confirm)"),
     ("tr", "Translate args; tap the button under the reply to add the English word/phrase to vocab"),
-    ("games", "Pick a game: Word->Translation / Translation->Word (vocab quiz, optional label filter), Irregular verbs, Repeat typed (remembered words), or Focus drill typed (in-progress /focus words). /games cancel ends an in-flight game."),
+    ("games", "Pick a game: Word->Translation / Translation->Word (vocab quiz, optional label filter), Irregular verbs, Repeat typed (remembered words), or Focus drill typed (in-progress /focus words). /games cancel ends an in-flight game or daily story session."),
     ("label", "Attach labels to a vocab word (e.g. /label horse pos:noun type:animal)"),
     ("unlabel", "Detach labels from a vocab word"),
     ("labels", "List every label in this chat with its attached-word count"),
@@ -356,13 +364,16 @@ COMMANDS: list[tuple[str, str]] = [
 HELP_TEXT = (
     "🤖 *Gemma vocab agent*\n\n"
     "*Getting started*\n"
-    "1. Run /start and answer five questions: timezone, pushes per day (6–12), "
-    "active window (HH:MM–HH:MM), tone, target language for /tr.\n"
+    "1. Run /start and answer five questions: timezone, words per daily "
+    "story (4–10), active window (HH:MM–HH:MM), tone, target language for /tr.\n"
     "2. Add words with /add <word or phrase> — or bulk-load a CSV with "
-    "/import (and grab a backup any time with /export). The bot sends short "
-    "snippets using those words at random times inside your window.\n"
-    "3. Tap ✅ knew / ❌ forgot on each push — ratings drive FSRS spaced "
-    "repetition so tougher words come back more often.\n"
+    "/import (and grab a backup any time with /export). Once a day, inside "
+    "your window, the bot sends a short story with your words replaced by "
+    "numbered blanks (plus a word bank).\n"
+    "3. Type the missing word for each blank — every answer rates the word "
+    "via FSRS spaced repetition, so tougher words come back more often. At "
+    "the end you get the full story, your score, and translations of what "
+    "you missed.\n"
     "4. Optional: tag words with /label (e.g. `/label horse pos:noun "
     "type:animal`) and slice the deck with /list, /games, or /focus.\n\n"
     "Plain (non-slash) messages chat with the model and will naturally reuse "
@@ -1032,11 +1043,13 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             or chat_id in irregulars
             or chat_id in repeat_games
             or chat_id in focus_drills
+            or chat_id in cloze_sessions
         )
         games.pop(chat_id, None)
         irregulars.pop(chat_id, None)
         repeat_games.pop(chat_id, None)
         focus_drills.pop(chat_id, None)
+        cloze_sessions.pop(chat_id, None)
         pending_game_filters.pop(chat_id, None)
         await update.message.reply_text(
             GAMES_CANCELLED if had_game else GAMES_NOTHING_TO_CANCEL
@@ -1504,6 +1517,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             sessions.pop(chat_id, None)
             log.info("Config saved for chat %s: %s", chat_id, settings)
         await update.message.reply_text(reply)
+        return
+
+    # Branch 1b: daily cloze-story session in progress — interpret plain text
+    # as the answer for the current blank. Each answer applies the FSRS
+    # rating the old ✅/❌ push buttons used to (correct → Good, miss → Again).
+    cz = cloze_sessions.get(chat_id)
+    if cz is not None and not cz.done:
+        blank = cz.current()
+        correct = cloze_module.grade_answer(user_text, blank.word)
+        try:
+            vocab.rate_word(
+                conn, blank.word_id, Rating.Good if correct else Rating.Again
+            )
+            vocab.record_outcome(
+                conn, blank.word_id, correct=correct, weight=1.0, source="push"
+            )
+        except KeyError:
+            log.warning("cloze answer: unknown word_id %s", blank.word_id)
+        cloze_module.apply_answer(cz, correct)
+        await update.message.reply_text(
+            cloze_module.format_answer_feedback(correct, blank.word)
+        )
+        if cz.done:
+            if cz.push_id is not None:
+                sched_module.mark_rated(conn, cz.push_id)
+            result = cloze_module.format_result(cz)
+            await safe_send(context.bot, chat_id, result, parse_mode="HTML")
+            append_turn(
+                chat_id, "story-result", f"{cz.score}/{cz.n_blanks}"
+            )
+            cloze_sessions.pop(chat_id, None)
+        else:
+            await update.message.reply_text(
+                cloze_module.format_blank_prompt(cz)
+            )
         return
 
     # Branch 2: irregular-verbs game in progress — interpret plain text as the

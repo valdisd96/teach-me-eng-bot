@@ -324,7 +324,7 @@ def test_select_word_zero_matching_names_returns_none(
 # === scheduler.compose_push(names=...) =======================================
 
 
-def test_compose_push_returns_none_when_filter_pool_empty(
+def test_compose_session_returns_none_when_filter_pool_empty(
     conn: sqlite3.Connection,
 ) -> None:  # AC3 + example — names that match nothing → None, llm not called
     import config_flow
@@ -347,17 +347,18 @@ def test_compose_push_returns_none_when_filter_pool_empty(
         raise AssertionError("llm should not run when filtered pool is empty")
 
     out = asyncio.run(
-        sched_module.compose_push(
-            conn, CHAT, llm_chat=llm_fail, names=["type:medicine"], rng=random.Random(0)
+        sched_module.compose_session(
+            conn, CHAT, llm_chat=llm_fail, n_words=5,
+            names=["type:medicine"], rng=random.Random(0),
         )
     )
 
     assert out is None, (
-        f"compose_push must return None when filter yields no candidate; got {out!r}"
+        f"compose_session must return None when filter yields no candidate; got {out!r}"
     )
 
 
-def test_compose_push_passes_names_to_select_word(
+def test_compose_session_passes_names_to_select_session_words(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # AC3 — names is forwarded to vocab.select_word
     import config_flow
@@ -376,30 +377,31 @@ def test_compose_push_passes_names_to_select_word(
     )
 
     seen_kwargs: list[dict] = []
-    real_select = vocab.select_word
+    real_select = vocab.select_session_words
 
-    def spy(conn_, chat_, **kw):
+    def spy(conn_, chat_, n_, **kw):
         seen_kwargs.append(kw)
-        return real_select(conn_, chat_, **kw)
+        return real_select(conn_, chat_, n_, **kw)
 
-    monkeypatch.setattr(vocab, "select_word", spy)
+    monkeypatch.setattr(vocab, "select_session_words", spy)
 
     async def llm_ok(msgs):
         return "horse rides at dawn"
 
     asyncio.run(
-        sched_module.compose_push(
+        sched_module.compose_session(
             conn,
             CHAT,
             llm_chat=llm_ok,
+            n_words=5,
             names=["pos:noun"],
             rng=random.Random(0),
         )
     )
 
-    assert seen_kwargs, "select_word must be invoked at least once"
+    assert seen_kwargs, "select_session_words must be invoked at least once"
     assert seen_kwargs[0].get("names") == ["pos:noun"], (
-        f"compose_push must forward names verbatim to select_word; got "
+        f"compose_session must forward names verbatim to select_session_words; got "
         f"{seen_kwargs[0].get('names')!r}"
     )
 
@@ -602,6 +604,17 @@ def test_cmd_focus_dedupes_and_lowercases_tokens(
 # === bot.dispatch_push =======================================================
 
 
+def _fake_session():
+    import cloze
+
+    return cloze.Session(
+        chat_id=CHAT,
+        story="the horse runs",
+        display="the ___(1) runs",
+        blanks=[cloze.Blank(word_id=1, word="horse", is_intro=False)],
+    )
+
+
 def _seed_settings_for_dispatch(conn: sqlite3.Connection) -> None:
     """Minimum chat config so dispatch_push has something to operate on."""
     import config_flow
@@ -628,7 +641,7 @@ def _patch_dispatch_runtime(
     monkeypatch.setattr(bot, "app", fake_app)
 
     compose_spy = AsyncMock(return_value=compose_return)
-    monkeypatch.setattr(bot.sched_module, "compose_push", compose_spy)
+    monkeypatch.setattr(bot.sched_module, "compose_session", compose_spy)
 
     return {"compose": compose_spy, "app": fake_app}
 
@@ -642,7 +655,7 @@ def test_dispatch_push_with_focus_passes_names_to_compose(
     vocab.set_focus_spec(conn, CHAT, "pos:noun type:medicine")
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
+        monkeypatch, conn, compose_return=_fake_session()
     )
 
     asyncio.run(bot.dispatch_push(CHAT))
@@ -665,7 +678,7 @@ def test_dispatch_push_with_no_focus_passes_none(
     assert vocab.get_focus_spec(conn, CHAT) is None  # precondition
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
+        monkeypatch, conn, compose_return=_fake_session()
     )
 
     asyncio.run(bot.dispatch_push(CHAT))
@@ -979,7 +992,7 @@ def test_select_word_mode_any_filters_by_or(
 # === scheduler.compose_push(mode="any") =====================================
 
 
-def test_compose_push_passes_mode_to_select_word(
+def test_compose_session_passes_mode_to_select_session_words(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # AC2 — compose_push forwards mode to vocab.select_word
     import config_flow
@@ -999,31 +1012,32 @@ def test_compose_push_passes_mode_to_select_word(
     )
 
     seen_kwargs: list[dict] = []
-    real_select = vocab.select_word
+    real_select = vocab.select_session_words
 
-    def spy(conn_, chat_, **kw):
+    def spy(conn_, chat_, n_, **kw):
         seen_kwargs.append(kw)
-        return real_select(conn_, chat_, **kw)
+        return real_select(conn_, chat_, n_, **kw)
 
-    monkeypatch.setattr(vocab, "select_word", spy)
+    monkeypatch.setattr(vocab, "select_session_words", spy)
 
     async def llm_ok(msgs):
         return "horse rides at dawn"
 
     asyncio.run(
-        sched_module.compose_push(
+        sched_module.compose_session(
             conn,
             CHAT,
             llm_chat=llm_ok,
+            n_words=5,
             names=["type:body"],
             mode="any",
             rng=random.Random(0),
         )
     )
 
-    assert seen_kwargs, "select_word must be invoked at least once"
+    assert seen_kwargs, "select_session_words must be invoked at least once"
     assert seen_kwargs[0].get("mode") == "any", (
-        f"AC2: compose_push must forward mode verbatim to select_word; "
+        f"AC2: compose_session must forward mode verbatim to select_session_words; "
         f"got mode={seen_kwargs[0].get('mode')!r}"
     )
 
@@ -1281,7 +1295,7 @@ def test_dispatch_push_with_any_focus_forwards_mode_any(
     vocab.set_focus_spec(conn, CHAT, "--any type:body type:medicine")
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
+        monkeypatch, conn, compose_return=_fake_session()
     )
 
     asyncio.run(bot.dispatch_push(CHAT))
@@ -1310,7 +1324,7 @@ def test_dispatch_push_with_legacy_spec_forwards_mode_all(
     vocab.set_focus_spec(conn, CHAT, "type:body type:medicine")
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
+        monkeypatch, conn, compose_return=_fake_session()
     )
 
     asyncio.run(bot.dispatch_push(CHAT))

@@ -16,14 +16,17 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import translator
 
 TONES = ("funny", "motivational", "scary", "bright", "mixed")
-MIN_PUSHES = 6
-MAX_PUSHES = 12
+# Words woven into the once-daily cloze-story session. Persisted in the
+# legacy `pushes_per_day` DB column; existing rows configured under the old
+# multi-push concept (6-12) simply yield longer stories.
+MIN_WORDS = 4
+MAX_WORDS = 10
 
 
 @dataclass
 class Settings:
     tz: str
-    pushes_per_day: int
+    words_per_day: int
     active_start: str  # "HH:MM"
     active_end: str
     tone: str
@@ -41,15 +44,15 @@ def validate_tz(s: str) -> str:
     return name
 
 
-def validate_pushes(s: str) -> int:
+def validate_words(s: str) -> int:
     try:
         n = int(s.strip())
     except ValueError as exc:
         raise ValueError(
-            f"Send a whole number between {MIN_PUSHES} and {MAX_PUSHES}."
+            f"Send a whole number between {MIN_WORDS} and {MAX_WORDS}."
         ) from exc
-    if not MIN_PUSHES <= n <= MAX_PUSHES:
-        raise ValueError(f"Pick a number between {MIN_PUSHES} and {MAX_PUSHES}.")
+    if not MIN_WORDS <= n <= MAX_WORDS:
+        raise ValueError(f"Pick a number between {MIN_WORDS} and {MAX_WORDS}.")
     return n
 
 
@@ -79,9 +82,9 @@ def validate_target_lang(s: str) -> str:
 _STEPS = [
     ("tz", "What timezone? (e.g. Europe/Warsaw, UTC)", validate_tz),
     (
-        "pushes_per_day",
-        f"How many pushes per day? ({MIN_PUSHES}–{MAX_PUSHES})",
-        validate_pushes,
+        "words_per_day",
+        f"How many words in your daily story? ({MIN_WORDS}–{MAX_WORDS})",
+        validate_words,
     ),
     (
         "active_start",
@@ -107,8 +110,8 @@ _STEPS = [
 
 INTRO = "Let's configure your vocab agent.\n\n"
 DONE_MESSAGE = (
-    "✅ All set. Add words with `/add <word>` and pushes will start "
-    "showing up in your active window.\n\n"
+    "✅ All set. Add words with `/add <word>` and a daily story session "
+    "will show up in your active window.\n\n"
     "Tip: tag words with `/label <word> pos:noun type:animal` to slice "
     "your deck — `/list`, `/games`, and `/focus` all accept the same "
     "label spec as a filter."
@@ -176,7 +179,7 @@ def save_settings(
         (
             chat_id,
             settings.tz,
-            settings.pushes_per_day,
+            settings.words_per_day,
             settings.active_start,
             settings.active_end,
             settings.tone,
@@ -198,7 +201,7 @@ def load_settings(
         return None
     return Settings(
         tz=row["tz"],
-        pushes_per_day=row["pushes_per_day"],
+        words_per_day=row["pushes_per_day"],
         active_start=row["active_start"],
         active_end=row["active_end"],
         tone=row["tone"],

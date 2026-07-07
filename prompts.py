@@ -88,6 +88,50 @@ def push_messages(
     ]
 
 
+_STORY_SYSTEM = (
+    "You write one short story for an English learner that weaves in a given "
+    "list of vocabulary words. "
+    "Every given word or phrase MUST appear literally exactly once (same "
+    "spelling, case-insensitive) — never replace one with a synonym or change "
+    "its form. "
+    "Around the given words, use simple, everyday English (CEFR A2–B1 level): "
+    "only common, easy words and plain grammar. "
+    "Write roughly one short sentence per given word, and build each word's "
+    "sentence around a clear, concrete situation so its meaning can be "
+    "guessed from the context. "
+    "Plain text only — no headings, no quotes, no lists, no numbering."
+)
+
+
+def story_messages(
+    words: list[str],
+    tone: str,
+    *,
+    rng: random.Random | None = None,
+) -> list[dict]:
+    """Build the messages payload for the daily cloze-story session.
+
+    The story must use every word in `words` literally exactly once —
+    `cloze.blank_story` relies on that to place the numbered blanks.
+    """
+    resolved = resolve_tone(tone, rng=rng)
+    listing = "\n".join(f"- {w}" for w in words)
+    return [
+        {
+            "role": "system",
+            "content": f"{_STORY_SYSTEM}\n{_TONE_INSTRUCTIONS[resolved]}",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Words to use (each exactly once):\n{listing}\n"
+                "Remember: every word above must appear in the story "
+                "exactly as written."
+            ),
+        },
+    ]
+
+
 def explain_messages(word: str) -> list[dict]:
     """Build messages asking for a brief meaning + one example for `word`.
 

@@ -725,6 +725,75 @@ def select_intro_word(
     return _sample_weighted(conn, chat_id, rows, rng=rng, now=now)
 
 
+def select_session_words(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    n: int,
+    *,
+    names: list[str] | None = None,
+    mode: Literal["all", "any"] = "all",
+    max_intro: int = 2,
+    rng: random.Random | None = None,
+    now: datetime.datetime | None = None,
+) -> list[sqlite3.Row]:
+    """Pick up to `n` distinct words for a daily cloze-story session.
+
+    Up to `max_intro` introduction-phase words (reps < INTRO_GRADUATION_REPS)
+    come first, deliberately ignoring the /focus filter — the session-based
+    replacement for introduction slots, so a freshly added word is guaranteed
+    exposure. The remaining slots are filled from the regular (focus-scoped
+    when `names` is non-empty) pool. Both draws use the standard weight
+    formula, sample without replacement, and exclude `remembered` words.
+    May return fewer than `n` rows (or none) when the pools are small.
+    """
+    now = now or _now_dt()
+    picked: list[sqlite3.Row] = []
+    intro_rows = conn.execute(
+        "SELECT * FROM words WHERE chat_id = ? AND reps < ?",
+        (chat_id, INTRO_GRADUATION_REPS),
+    ).fetchall()
+    picked += _sample_weighted_many(
+        conn, chat_id, intro_rows, k=min(max_intro, n), rng=rng, now=now
+    )
+    if names:
+        rows = words_matching_labels(conn, chat_id, names, mode=mode)
+    else:
+        rows = conn.execute(
+            "SELECT * FROM words WHERE chat_id = ?", (chat_id,)
+        ).fetchall()
+    taken = {r["id"] for r in picked}
+    rows = [r for r in rows if r["id"] not in taken]
+    picked += _sample_weighted_many(
+        conn, chat_id, rows, k=n - len(picked), rng=rng, now=now
+    )
+    return picked
+
+
+def _sample_weighted_many(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    rows: list[sqlite3.Row],
+    *,
+    k: int,
+    rng: random.Random | None = None,
+    now: datetime.datetime | None = None,
+) -> list[sqlite3.Row]:
+    """Weighted-random sample of up to `k` rows without replacement, minus
+    `remembered` words. Fewer than `k` when the pool runs dry."""
+    now = now or _now_dt()
+    rng = rng or random
+    excluded = remembered_word_ids(conn, chat_id)
+    pool = [r for r in rows if r["id"] not in excluded]
+    hard_ids = hard_focus_word_ids(conn, chat_id)
+    picked: list[sqlite3.Row] = []
+    while pool and len(picked) < k:
+        weights = [compute_weight(r, now, hard_word_ids=hard_ids) for r in pool]
+        choice = rng.choices(pool, weights=weights, k=1)[0]
+        picked.append(choice)
+        pool = [r for r in pool if r["id"] != choice["id"]]
+    return picked
+
+
 def _sample_weighted(
     conn: sqlite3.Connection,
     chat_id: int,

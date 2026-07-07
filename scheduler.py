@@ -9,9 +9,10 @@ stays free of telegram imports.
 equal-sized buckets with a half-gap buffer at bucket edges — so consecutive
 pushes can't cluster against the boundary.
 
-`compose_push` runs one cycle: select a word, prompt the LLM, retry once if
-the word didn't appear literally. Persistence of the sent message is the
-caller's job so bot.py can include the Telegram message id.
+`compose_session` builds the once-daily cloze-story session: select the
+day's words, prompt the LLM for a story, retry once if any word didn't
+appear literally, and blank the found words. Persistence of the sent
+message is the caller's job so bot.py can include the Telegram message id.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+import cloze
 import config_flow
 import prompts
 import vocab
@@ -37,15 +39,9 @@ import vocab
 log = logging.getLogger(__name__)
 
 # Minimum gap between consecutive pushes (minutes). Enforced implicitly by the
-# bucket algorithm below.
+# bucket algorithm below. Only relevant when more than one push is planned;
+# the daily cloze session plans a single time, where this is a no-op.
 MIN_GAP_MIN = 45
-
-# Every INTRO_EVERY-th push of a chat's local day is an "introduction slot":
-# it draws from the introduction pool (words with fewer than
-# `vocab.INTRO_GRADUATION_REPS` ratings) and bypasses the /focus filter, so
-# freshly added words are guaranteed exposure while still fresh in memory.
-# With 6–12 pushes/day this yields 2–4 introduction pushes daily.
-INTRO_EVERY = 3
 
 
 def _parse_hm(s: str) -> tuple[int, int]:
@@ -104,89 +100,75 @@ LlmChat = Callable[[list[dict]], Awaitable[str]]
 TranslateFn = Callable[[str, str], Awaitable[str]]
 
 
-def is_intro_slot(
-    conn: sqlite3.Connection,
-    chat_id: int,
-    tz: str,
-    *,
-    now: datetime.datetime | None = None,
-) -> bool:
-    """True when the chat's next push lands on an introduction slot.
-
-    Derived statelessly from push_log: pushes already sent since the chat's
-    local midnight are counted, and every INTRO_EVERY-th one (0-based) is an
-    introduction slot — so the first push of each day always is. `sent_at`
-    is stored as UTC, so local midnight is converted before comparing.
-    """
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=datetime.timezone.utc)
-    local_midnight = now.astimezone(ZoneInfo(tz)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    since = local_midnight.astimezone(datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    sent_today = conn.execute(
-        "SELECT COUNT(*) FROM push_log WHERE chat_id = ? AND sent_at >= ?",
-        (chat_id, since),
-    ).fetchone()[0]
-    return sent_today % INTRO_EVERY == 0
-
-
-async def compose_push(
+async def compose_session(
     conn: sqlite3.Connection,
     chat_id: int,
     *,
     llm_chat: LlmChat,
+    n_words: int,
     names: list[str] | None = None,
     mode: Literal["all", "any"] = "all",
     rng: random.Random | None = None,
     now: datetime.datetime | None = None,
     retries: int = 1,
-) -> tuple[int, str, str, bool] | None:
-    """Select a word and prompt the LLM. Returns (word_id, word, text,
-    is_intro) or None.
+) -> cloze.Session | None:
+    """Build the daily cloze-story session. Returns a `cloze.Session` or None.
 
-    When the push lands on an introduction slot (`is_intro_slot`) and the
-    chat has introduction-phase words, the word comes from
-    `vocab.select_intro_word` — deliberately ignoring `names`, so freshly
-    added unlabelled words surface even under an active /focus. `is_intro`
-    is True on that path so the caller can badge the message.
-
-    Otherwise `names`, when non-empty, restricts the candidate pool via
-    `vocab.select_word`. `mode="all"` (default) requires every label;
-    `mode="any"` requires at least one. A filter that yields zero matches
-    returns None — the caller logs and skips the push.
-
-    Retries once if the word doesn't appear literally in the output. On final
-    failure the text is returned anyway — rare with short vocab prompts and
-    better than dropping the push.
+    Words come from `vocab.select_session_words`: up to
+    `cloze.MAX_INTRO_WORDS` introduction-phase picks bypass the `names`
+    /focus filter, the rest respect it. The LLM writes one story using every
+    word literally; if any word is missing from the story the call is
+    retried once, and words still missing after that are dropped from the
+    session (logged) rather than blocking it. Returns None when no words are
+    available, the chat is unconfigured, or no word made it into the story.
     """
     chat_row = conn.execute(
-        "SELECT tone, tz FROM chats WHERE chat_id = ?", (chat_id,)
+        "SELECT tone FROM chats WHERE chat_id = ?", (chat_id,)
     ).fetchone()
     if chat_row is None:
         return None
-    picked = None
-    if is_intro_slot(conn, chat_id, chat_row["tz"], now=now):
-        picked = vocab.select_intro_word(conn, chat_id, rng=rng, now=now)
-    is_intro = picked is not None
-    if picked is None:
-        picked = vocab.select_word(
-            conn, chat_id, names=names, mode=mode, rng=rng, now=now
-        )
-    if picked is None:
+    picked = vocab.select_session_words(
+        conn,
+        chat_id,
+        n_words,
+        names=names,
+        mode=mode,
+        max_intro=cloze.MAX_INTRO_WORDS,
+        rng=rng,
+        now=now,
+    )
+    if not picked:
         return None
 
-    tone = chat_row["tone"]
-    word = picked["text"]
-    text = ""
+    texts = [r["text"] for r in picked]
+    story, display, order, missing = "", "", [], texts
     for _ in range(retries + 1):
-        text = await llm_chat(prompts.push_messages(word, tone, rng=rng))
-        if word in text.lower():
+        story = await llm_chat(
+            prompts.story_messages(texts, chat_row["tone"], rng=rng)
+        )
+        display, order, missing = cloze.blank_story(story, texts)
+        if not missing:
             break
-    return picked["id"], word, text, is_intro
+    if missing:
+        log.warning(
+            "Session for chat %s: dropping words missing from story: %s",
+            chat_id,
+            missing,
+        )
+    if not order:
+        return None
+    blanks = [
+        cloze.Blank(
+            word_id=picked[i]["id"],
+            word=picked[i]["text"],
+            is_intro=picked[i]["reps"] < vocab.INTRO_GRADUATION_REPS,
+            translation=picked[i]["translation"],
+        )
+        for i in order
+    ]
+    return cloze.Session(
+        chat_id=chat_id, story=story, display=display, blanks=blanks
+    )
 
 
 async def compose_explanation(
@@ -345,10 +327,12 @@ class PushRunner:
         self._remove_push_jobs(chat_id)
         zone = ZoneInfo(settings.tz)
         now = datetime.datetime.now(zone)
+        # One daily cloze-story session; words_per_day sizes the story, not
+        # the schedule.
         times = plan_push_times(
             now.date(),
             settings.tz,
-            settings.pushes_per_day,
+            1,
             settings.active_start,
             settings.active_end,
         )
@@ -365,7 +349,7 @@ class PushRunner:
             )
             scheduled.append(t)
         log.info(
-            "Planned %d pushes for chat %s today: %s",
+            "Planned %d session(s) for chat %s today: %s",
             len(scheduled),
             chat_id,
             [t.isoformat(timespec="minutes") for t in scheduled],

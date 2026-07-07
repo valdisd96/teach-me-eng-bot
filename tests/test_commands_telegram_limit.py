@@ -22,7 +22,7 @@ TELEGRAM_DESC_MAX = 256
 # `"games"` (whose description is the one being rewritten). AC5: drive-by edits
 # to any other entry would diverge from this snapshot and fail.
 EXPECTED_NON_GAMES_ENTRIES: list[tuple[str, str]] = [
-    ("start", "Configure schedule: timezone, pushes/day, active window, tone, target language"),
+    ("start", "Configure schedule: timezone, words per daily story, active window, tone, target language"),
     ("help", "Show this help message"),
     ("add", "Add a word or phrase to this chat's vocab"),
     ("remove", "Remove a word or phrase from vocab"),
