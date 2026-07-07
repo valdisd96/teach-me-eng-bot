@@ -46,15 +46,14 @@ from telegram.request import HTTPXRequest
 import cloze as cloze_module
 import config_flow
 import db as db_module
-import focus_drill as focus_drill_module
 import games as games_module
 import irregular_verbs as irregular_module
 import llm
 import prompts
-import repeat_game as repeat_module
 import scheduler as sched_module
 import sysinfo
 import translator
+import typed_drill
 import vocab
 
 load_dotenv()
@@ -133,10 +132,9 @@ import_pending: dict[int, float] = {}
 games: dict[int, games_module.Game] = {}
 # In-flight /irregulars sessions: same one-per-chat semantics as `games`.
 irregulars: dict[int, irregular_module.Game] = {}
-# In-flight "Repeat (typed)" sessions: same one-per-chat semantics as `games`.
-repeat_games: dict[int, repeat_module.Game] = {}
-# In-flight "Focus drill (typed)" sessions: same one-per-chat semantics.
-focus_drills: dict[int, focus_drill_module.Game] = {}
+# In-flight typed drills (Repeat / Focus drill — Game.kind tells them apart):
+# same one-per-chat semantics as `games`.
+typed_drills: dict[int, typed_drill.Game] = {}
 # In-flight daily cloze-story sessions: one per chat, replaced by the next
 # day's dispatch and cleared on completion, /games cancel, or bot restart.
 cloze_sessions: dict[int, cloze_module.Session] = {}
@@ -162,15 +160,14 @@ IRREGULARS_PROMPT_HINT = (
 REPEAT_IN_PROGRESS = "you have a repeat game in progress"
 REPEAT_NOT_ENOUGH = (
     f"not enough remembered words yet — keep practising "
-    f"(need at least {repeat_module.N_ROUNDS})"
+    f"(need at least {typed_drill.REPEAT_ROUNDS})"
 )
-REPEAT_PROMPT_HINT = "Type the translation."
 FOCUS_DRILL_IN_PROGRESS = "you have a focus drill in progress"
 FOCUS_DRILL_NOT_ENOUGH = (
     f"not enough focus words yet — add more or widen /focus "
-    f"(need at least {focus_drill_module.MIN_ROUNDS})"
+    f"(need at least {typed_drill.MIN_ROUNDS})"
 )
-FOCUS_DRILL_PROMPT_HINT = "Type the translation."
+DRILL_PROMPT_HINT = "Type the translation."
 STORY_IN_PROGRESS = (
     "you have an unfinished daily story — answer its blanks first, "
     "or /games cancel to abandon it"
@@ -181,14 +178,18 @@ def _in_progress_reply(chat_id: int) -> str | None:
     """The in-progress message for the chat's active game/session, or None.
 
     Single source of truth for every "is something already running?" gate —
-    covers ALL five state maps so a new activity can't slip past (the cloze
+    covers ALL state maps so a new activity can't slip past (the cloze
     session was originally missing from the hand-rolled per-handler chains).
     """
+    drill = typed_drills.get(chat_id)
+    if drill is not None:
+        return (
+            REPEAT_IN_PROGRESS if drill.kind == "repeat"
+            else FOCUS_DRILL_IN_PROGRESS
+        )
     for store, reply in (
         (games, GAMES_IN_PROGRESS),
         (irregulars, IRREGULARS_IN_PROGRESS),
-        (repeat_games, REPEAT_IN_PROGRESS),
-        (focus_drills, FOCUS_DRILL_IN_PROGRESS),
         (cloze_sessions, STORY_IN_PROGRESS),
     ):
         if chat_id in store:
@@ -198,11 +199,7 @@ def _in_progress_reply(chat_id: int) -> str | None:
 
 def _typed_game_active(chat_id: int) -> bool:
     """True while a game that consumes plain-text answers is in flight."""
-    return (
-        chat_id in irregulars
-        or chat_id in repeat_games
-        or chat_id in focus_drills
-    )
+    return chat_id in irregulars or chat_id in typed_drills
 
 
 # --- transcript + access helpers --------------------------------------------
@@ -1109,8 +1106,7 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         had_game = _in_progress_reply(chat_id) is not None
         games.pop(chat_id, None)
         irregulars.pop(chat_id, None)
-        repeat_games.pop(chat_id, None)
-        focus_drills.pop(chat_id, None)
+        typed_drills.pop(chat_id, None)
         cz = cloze_sessions.pop(chat_id, None)
         if cz is not None and cz.push_id is not None:
             # Close the push_log row so a restart doesn't resurrect the
@@ -1170,30 +1166,16 @@ def _format_irregular_prompt(game: irregular_module.Game) -> str:
     )
 
 
-def _format_repeat_prompt(game: repeat_module.Game) -> str:
+def _format_drill_prompt(game: typed_drill.Game) -> str:
     rd = game.current()
     return (
         f"Round {game.current_round + 1}/{game.n_rounds}: {rd.prompt}\n"
-        f"{REPEAT_PROMPT_HINT}"
+        f"{DRILL_PROMPT_HINT}"
     )
 
 
-async def _send_repeat_round(bot, chat_id: int, game: repeat_module.Game) -> None:
-    await bot.send_message(chat_id=chat_id, text=_format_repeat_prompt(game))
-
-
-def _format_focus_drill_prompt(game: focus_drill_module.Game) -> str:
-    rd = game.current()
-    return (
-        f"Round {game.current_round + 1}/{game.n_rounds}: {rd.prompt}\n"
-        f"{FOCUS_DRILL_PROMPT_HINT}"
-    )
-
-
-async def _send_focus_drill_round(
-    bot, chat_id: int, game: focus_drill_module.Game
-) -> None:
-    await bot.send_message(chat_id=chat_id, text=_format_focus_drill_prompt(game))
+async def _send_drill_round(bot, chat_id: int, game: typed_drill.Game) -> None:
+    await bot.send_message(chat_id=chat_id, text=_format_drill_prompt(game))
 
 
 # --- callback handlers ------------------------------------------------------
@@ -1333,13 +1315,15 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if r["id"] in remembered_ids and r["id"] not in mastered_ids
         ]
         try:
-            rounds = repeat_module.draw_rounds(pool, rng=random.Random())
+            rounds = typed_drill.draw_rounds(
+                pool, n_max=typed_drill.REPEAT_ROUNDS, rng=random.Random()
+            )
         except ValueError:
             await query.message.reply_text(REPEAT_NOT_ENOUGH)
             return
-        game = repeat_module.Game(chat_id=chat_id, rounds=rounds)
-        repeat_games[chat_id] = game
-        await _send_repeat_round(context.bot, chat_id, game)
+        game = typed_drill.Game(chat_id=chat_id, rounds=rounds, kind="repeat")
+        typed_drills[chat_id] = game
+        await _send_drill_round(context.bot, chat_id, game)
         return
     if query.data == "gm:focus":
         focus_text = vocab.get_focus_spec(conn, chat_id)
@@ -1347,13 +1331,15 @@ async def on_games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         names = names_list or None
         pool = _playable_rows(conn, chat_id, names, mode=mode)
         try:
-            rounds = focus_drill_module.draw_rounds(pool, rng=random.Random())
+            rounds = typed_drill.draw_rounds(
+                pool, n_max=typed_drill.MAX_FOCUS_ROUNDS, rng=random.Random()
+            )
         except ValueError:
             await query.message.reply_text(FOCUS_DRILL_NOT_ENOUGH)
             return
-        game = focus_drill_module.Game(chat_id=chat_id, rounds=rounds)
-        focus_drills[chat_id] = game
-        await _send_focus_drill_round(context.bot, chat_id, game)
+        game = typed_drill.Game(chat_id=chat_id, rounds=rounds, kind="focus")
+        typed_drills[chat_id] = game
+        await _send_drill_round(context.bot, chat_id, game)
         return
     if query.data == "gm:wt":
         direction = "wt"
@@ -1563,70 +1549,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(_format_irregular_prompt(irr_game))
         return
 
-    # Branch 2b: repeat (typed) game in progress — interpret plain text as the
-    # round answer, grade case-insensitively, record outcome.
-    rep_game = repeat_games.get(chat_id)
-    if rep_game is not None and not rep_game.done:
-        rd = rep_game.current()
-        correct = await repeat_module.grade_answer_llm(user_text, rd)
+    # Branch 2b: typed drill (Repeat or Focus drill) in progress — interpret
+    # plain text as the round answer. Repeat grades via the tolerant LLM
+    # judge and records source="repeat" (gates the forget-flip: a wrong
+    # answer drops `remembered` and attaches `focus:hard`); Focus drill
+    # grades strictly and records source="game" (no forget-flip — its words
+    # are non-remembered by construction).
+    drill = typed_drills.get(chat_id)
+    if drill is not None and not drill.done:
+        rd = drill.current()
+        if drill.kind == "repeat":
+            correct = await typed_drill.grade_answer_llm(user_text, rd)
+        else:
+            correct = typed_drill.grade_answer(user_text, rd)
         if correct:
             reply = f"✅ {rd.expected}"
         else:
             reply = f"❌ correct: {rd.expected}"
         source_word = rd.prompt if rd.direction == "en2ru" else rd.expected
-        repeat_module.apply_answer(rep_game, correct, source_word=source_word)
+        typed_drill.apply_answer(drill, correct, source_word=source_word)
         try:
-            # source="repeat" gates the forget-flip in record_outcome — a wrong
-            # answer here drops `remembered` and attaches `focus:hard`.
             vocab.record_outcome(
-                conn, rd.word_id, correct=correct, weight=0.5, source="repeat"
+                conn, rd.word_id, correct=correct, weight=0.5,
+                source="repeat" if drill.kind == "repeat" else "game",
             )
         except KeyError:
             log.warning("record_outcome: unknown word_id %s", rd.word_id)
         await update.message.reply_text(reply)
-        if rep_game.done:
+        if drill.done:
             await update.message.reply_text(
-                repeat_module.format_result(
-                    rep_game.score, rep_game.n_rounds, rep_game.wrong
+                typed_drill.format_result(
+                    drill.score, drill.n_rounds, drill.wrong
                 )
             )
-            repeat_games.pop(chat_id, None)
+            typed_drills.pop(chat_id, None)
             await _fire_deferred_session(chat_id)
         else:
-            await update.message.reply_text(_format_repeat_prompt(rep_game))
-        return
-
-    # Branch 2c: focus drill (typed) — same shape as repeat, but words are
-    # non-remembered focus-scoped rows, so we use source="game" (no forget-flip).
-    fd_game = focus_drills.get(chat_id)
-    if fd_game is not None and not fd_game.done:
-        rd = fd_game.current()
-        correct = focus_drill_module.grade_answer(user_text, rd)
-        if correct:
-            reply = f"✅ {rd.expected}"
-        else:
-            reply = f"❌ correct: {rd.expected}"
-        source_word = rd.prompt if rd.direction == "en2ru" else rd.expected
-        focus_drill_module.apply_answer(
-            fd_game, correct, source_word=source_word
-        )
-        try:
-            vocab.record_outcome(
-                conn, rd.word_id, correct=correct, weight=0.5, source="game"
-            )
-        except KeyError:
-            log.warning("record_outcome: unknown word_id %s", rd.word_id)
-        await update.message.reply_text(reply)
-        if fd_game.done:
-            await update.message.reply_text(
-                focus_drill_module.format_result(
-                    fd_game.score, fd_game.n_rounds, fd_game.wrong
-                )
-            )
-            focus_drills.pop(chat_id, None)
-            await _fire_deferred_session(chat_id)
-        else:
-            await update.message.reply_text(_format_focus_drill_prompt(fd_game))
+            await update.message.reply_text(_format_drill_prompt(drill))
         return
 
     # Branch 3: just-talk. Inject vocab words into the system prompt so the

@@ -127,11 +127,9 @@ def _make_context(args: list[str] | None = None) -> MagicMock:
 def _patch_bot(monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection) -> None:
     monkeypatch.setattr(bot, "conn", conn)
     bot.games.clear()
-    bot.repeat_games.clear()
+    bot.typed_drills.clear()
     if hasattr(bot, "irregulars"):
         bot.irregulars.clear()
-    if hasattr(bot, "focus_drills"):
-        bot.focus_drills.clear()
     if hasattr(bot, "pending_game_filters"):
         bot.pending_game_filters.clear()
 
@@ -484,7 +482,8 @@ def test_on_games_menu_gm_repeat_excludes_mastered(
 ) -> None:  # AC7 — gm:repeat pool = remembered AND NOT mastered
     _patch_bot(monkeypatch, conn)
     # Seed 6 translatable words; all 6 marked remembered; 1 also marked mastered.
-    # n_rounds defaults to 5 — the un-mastered 5 must be exactly the rounds.
+    # Repeat runs typed_drill.REPEAT_ROUNDS (5) rounds — the un-mastered 5
+    # must be exactly the rounds.
     words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
     vocab.ensure_chat(conn, CHAT)
     vocab.add_words_bulk(
@@ -500,9 +499,12 @@ def test_on_games_menu_gm_repeat_excludes_mastered(
     update = _make_callback_update("gm:repeat")
     asyncio.run(bot.on_games_menu(update, _make_context([])))
 
-    game = bot.repeat_games.get(CHAT)
+    game = bot.typed_drills.get(CHAT)
     assert game is not None, (
         "AC7 — a viable post-exclusion pool (5 words) must start a repeat game"
+    )
+    assert game.kind == "repeat", (
+        f"AC7 — gm:repeat must store a kind='repeat' drill; got {game.kind!r}"
     )
     round_ids = {r.word_id for r in game.rounds}
     assert zeta_id not in round_ids, (

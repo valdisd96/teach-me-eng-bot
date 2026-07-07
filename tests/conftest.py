@@ -36,8 +36,7 @@ def _clear_bot_state():
     for name in (
         "games",
         "irregulars",
-        "repeat_games",
-        "focus_drills",
+        "typed_drills",
         "cloze_sessions",
         "pending_game_filters",
         "sessions",

@@ -1,10 +1,14 @@
 """Tests for issue #129 — README + /help coverage of system labels and the
-Repeat (typed) game mode.
+Repeat (typed) game mode (now the kind="repeat" drill in `typed_drill.py`;
+this file was `test_repeat_game_docs.py` before the repeat_game/focus_drill
+merge).
 
 Spec lives in the latest `<!-- agent-plan v1 -->` comment on the issue. These
 are docs-tests — they read README.md and bot.py from disk as text rather than
 importing the module, so they assert what users actually see when grepping
-the repo for label names and streak rules.
+the repo for label names and streak rules. Repeat stays fixed at 5 rounds
+after the merge (`typed_drill.REPEAT_ROUNDS`), so the "5 rounds" doc
+assertion below is still the module truth.
 """
 
 from __future__ import annotations
