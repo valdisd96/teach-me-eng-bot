@@ -31,7 +31,7 @@ A [python-telegram-bot](https://python-telegram-bot.org) app talking to any Open
 
 Plain (non-slash) messages hit the LLM with vocab injected into the system prompt as soft hints. Words that appear literally in the reply bump their `mention_count` and get freshness credit.
 
-Scheduled pushes send 1 short snippet using 1 vocab word in the chosen tone, with `✅ knew / ❌ forgot` buttons that apply FSRS `Good` / `Again`.
+Scheduled pushes send 1 short snippet using 1 vocab word in the chosen tone, with `✅ knew / ❌ forgot` buttons that apply FSRS `Good` / `Again`. Every 3rd push of the day is an **introduction slot** (marked 🆕): it presents a newly added word — one rated fewer than 2 times — even when the word has no labels and a `/focus` is active, so fresh words never silently vanish into the vocab. After 2 ratings the word graduates into the regular pool.
 
 ---
 

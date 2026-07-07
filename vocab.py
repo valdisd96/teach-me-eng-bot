@@ -33,6 +33,12 @@ FSRS_RETENTION = 0.95
 FSRS_MAX_DAYS = 7
 RECENCY_TAU_DAYS = 7.0
 
+# A word is in its "introduction" phase until it has been FSRS-rated this many
+# times. Introduction-phase words get dedicated push slots that bypass the
+# chat's /focus filter — otherwise a fresh unlabelled /add can never surface
+# while a focus spec is active.
+INTRO_GRADUATION_REPS = 2
+
 # enable_fuzzing=False → deterministic intervals, easier to test and reason about.
 _SCHEDULER = Scheduler(
     desired_retention=FSRS_RETENTION,
@@ -442,19 +448,22 @@ def mark_target_word(text: str, target: str) -> str:
     return "".join(out)
 
 
-def format_push_body(target: str, text: str) -> str:
+def format_push_body(target: str, text: str, *, intro: bool = False) -> str:
     """Compose `📌 <b>target</b>` header + a body where `target` is bolded inline.
 
     The header anchors the chosen vocab word so the user can identify it at a
     glance even when the snippet uses an inflected form or sits inside dense
     prose. Header and body are separated by a blank line. When `target` is
     empty the header is omitted (defensive — production callers always have a
-    word). Both halves are HTML-safe.
+    word). `intro=True` appends a 🆕 badge to the header so introduction-slot
+    pushes (new words still bypassing /focus) are recognisable. Both halves
+    are HTML-safe.
     """
     body = mark_target_word(text, target)
     if not target:
         return body
-    return f"{PUSH_HEADER_PREFIX} <b>{html.escape(target)}</b>\n\n{body}"
+    badge = " 🆕" if intro else ""
+    return f"{PUSH_HEADER_PREFIX} <b>{html.escape(target)}</b>{badge}\n\n{body}"
 
 
 def bump_mentions(conn: sqlite3.Connection, word_ids: list[int]) -> None:
@@ -689,6 +698,43 @@ def select_word(
         rows = conn.execute(
             "SELECT * FROM words WHERE chat_id = ?", (chat_id,)
         ).fetchall()
+    return _sample_weighted(conn, chat_id, rows, rng=rng, now=now)
+
+
+def select_intro_word(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    *,
+    rng: random.Random | None = None,
+    now: datetime.datetime | None = None,
+) -> sqlite3.Row | None:
+    """Sample one introduction-phase word (fewer than INTRO_GRADUATION_REPS
+    FSRS ratings). None if the chat has no such words.
+
+    Deliberately ignores any /focus label filter: this is the pool of words
+    the user just added, and the whole point of introduction slots is that a
+    fresh word surfaces even before it has labels. Words carrying the
+    `remembered` system label are still excluded (a word can graduate through
+    games without ever being push-rated). Sampling reuses the standard weight
+    formula, so among intro words the most recently added lean heaviest.
+    """
+    rows = conn.execute(
+        "SELECT * FROM words WHERE chat_id = ? AND reps < ?",
+        (chat_id, INTRO_GRADUATION_REPS),
+    ).fetchall()
+    return _sample_weighted(conn, chat_id, rows, rng=rng, now=now)
+
+
+def _sample_weighted(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    rows: list[sqlite3.Row],
+    *,
+    rng: random.Random | None = None,
+    now: datetime.datetime | None = None,
+) -> sqlite3.Row | None:
+    """Weighted-random pick from `rows`, minus `remembered` words. None if empty."""
+    now = now or _now_dt()
     excluded = remembered_word_ids(conn, chat_id)
     if excluded:
         rows = [r for r in rows if r["id"] not in excluded]

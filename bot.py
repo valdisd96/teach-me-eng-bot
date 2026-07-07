@@ -300,7 +300,7 @@ async def dispatch_push(chat_id: int) -> None:
         else:
             log.info("No push for chat %s (no vocab or chat missing)", chat_id)
         return
-    word_id, word, text = composed
+    word_id, word, text, is_intro = composed
 
     # Insert push_log first so the callback_data can reference a real push id;
     # update tg_message_id after the Telegram send returns.
@@ -315,7 +315,7 @@ async def dispatch_push(chat_id: int) -> None:
             ),
         ]]
     )
-    formatted = vocab.format_push_body(word, text)
+    formatted = vocab.format_push_body(word, text, intro=is_intro)
     try:
         msg = await app.bot.send_message(
             chat_id=chat_id, text=formatted, reply_markup=kb, parse_mode="HTML"

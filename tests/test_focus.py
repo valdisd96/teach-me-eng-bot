@@ -336,6 +336,12 @@ def test_compose_push_returns_none_when_filter_pool_empty(
     )
     vocab.add_word(conn, CHAT, "horse")
     _attach(conn, CHAT, "horse", "pos:noun")
+    # Graduate the word out of the introduction pool — otherwise the first
+    # push of the day is an intro slot and would pick it despite the filter.
+    conn.execute(
+        "UPDATE words SET reps = ? WHERE chat_id = ?",
+        (vocab.INTRO_GRADUATION_REPS, CHAT),
+    )
 
     async def llm_fail(msgs):  # must not be called when no candidate
         raise AssertionError("llm should not run when filtered pool is empty")
@@ -362,6 +368,12 @@ def test_compose_push_passes_names_to_select_word(
         config_flow.Settings("UTC", 2, "09:00", "21:00", "funny", "ru"),
     )
     vocab.add_word(conn, CHAT, "horse")
+    # Graduate out of the introduction pool so the push takes the
+    # select_word path this test spies on.
+    conn.execute(
+        "UPDATE words SET reps = ? WHERE chat_id = ?",
+        (vocab.INTRO_GRADUATION_REPS, CHAT),
+    )
 
     seen_kwargs: list[dict] = []
     real_select = vocab.select_word
@@ -630,7 +642,7 @@ def test_dispatch_push_with_focus_passes_names_to_compose(
     vocab.set_focus_spec(conn, CHAT, "pos:noun type:medicine")
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs")
+        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
     )
 
     asyncio.run(bot.dispatch_push(CHAT))
@@ -653,7 +665,7 @@ def test_dispatch_push_with_no_focus_passes_none(
     assert vocab.get_focus_spec(conn, CHAT) is None  # precondition
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs")
+        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
     )
 
     asyncio.run(bot.dispatch_push(CHAT))
@@ -979,6 +991,12 @@ def test_compose_push_passes_mode_to_select_word(
     )
     vocab.add_word(conn, CHAT, "horse")
     _attach(conn, CHAT, "horse", "type:body")
+    # Graduate out of the introduction pool so the push takes the
+    # select_word path this test spies on.
+    conn.execute(
+        "UPDATE words SET reps = ? WHERE chat_id = ?",
+        (vocab.INTRO_GRADUATION_REPS, CHAT),
+    )
 
     seen_kwargs: list[dict] = []
     real_select = vocab.select_word
@@ -1263,7 +1281,7 @@ def test_dispatch_push_with_any_focus_forwards_mode_any(
     vocab.set_focus_spec(conn, CHAT, "--any type:body type:medicine")
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs")
+        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
     )
 
     asyncio.run(bot.dispatch_push(CHAT))
@@ -1292,7 +1310,7 @@ def test_dispatch_push_with_legacy_spec_forwards_mode_all(
     vocab.set_focus_spec(conn, CHAT, "type:body type:medicine")
 
     spies = _patch_dispatch_runtime(
-        monkeypatch, conn, compose_return=(1, "horse", "the horse runs")
+        monkeypatch, conn, compose_return=(1, "horse", "the horse runs", False)
     )
 
     asyncio.run(bot.dispatch_push(CHAT))

@@ -194,7 +194,7 @@ def test_compose_push_returns_word_and_text_on_first_try(conn: sqlite3.Connectio
         )
     )
     assert out is not None
-    _, word, text = out
+    _, word, text, _ = out
     assert word == "ephemeral"
     assert "ephemeral" in text.lower()
     assert len(calls) == 1
@@ -218,7 +218,7 @@ def test_compose_push_retries_when_word_missing(conn: sqlite3.Connection) -> Non
         )
     )
     assert out is not None
-    _, word, text = out
+    _, word, text, _ = out
     assert word == "ephemeral"
     assert "ephemeral" in text.lower()
     assert len(calls) == 2
@@ -238,7 +238,7 @@ def test_compose_push_returns_anyway_after_retries(conn: sqlite3.Connection) -> 
     )
     # With retries=1 we try 2 times and still return.
     assert out is not None
-    _, word, text = out
+    _, word, text, _ = out
     assert word == "ephemeral"
     assert "ephemeral" not in text.lower()
 

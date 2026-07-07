@@ -40,6 +40,13 @@ log = logging.getLogger(__name__)
 # bucket algorithm below.
 MIN_GAP_MIN = 45
 
+# Every INTRO_EVERY-th push of a chat's local day is an "introduction slot":
+# it draws from the introduction pool (words with fewer than
+# `vocab.INTRO_GRADUATION_REPS` ratings) and bypasses the /focus filter, so
+# freshly added words are guaranteed exposure while still fresh in memory.
+# With 6–12 pushes/day this yields 2–4 introduction pushes daily.
+INTRO_EVERY = 3
+
 
 def _parse_hm(s: str) -> tuple[int, int]:
     h, m = s.split(":")
@@ -97,6 +104,36 @@ LlmChat = Callable[[list[dict]], Awaitable[str]]
 TranslateFn = Callable[[str, str], Awaitable[str]]
 
 
+def is_intro_slot(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    tz: str,
+    *,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """True when the chat's next push lands on an introduction slot.
+
+    Derived statelessly from push_log: pushes already sent since the chat's
+    local midnight are counted, and every INTRO_EVERY-th one (0-based) is an
+    introduction slot — so the first push of each day always is. `sent_at`
+    is stored as UTC, so local midnight is converted before comparing.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    local_midnight = now.astimezone(ZoneInfo(tz)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    since = local_midnight.astimezone(datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    sent_today = conn.execute(
+        "SELECT COUNT(*) FROM push_log WHERE chat_id = ? AND sent_at >= ?",
+        (chat_id, since),
+    ).fetchone()[0]
+    return sent_today % INTRO_EVERY == 0
+
+
 async def compose_push(
     conn: sqlite3.Connection,
     chat_id: int,
@@ -107,10 +144,17 @@ async def compose_push(
     rng: random.Random | None = None,
     now: datetime.datetime | None = None,
     retries: int = 1,
-) -> tuple[int, str, str] | None:
-    """Select a word and prompt the LLM. Returns (word_id, word, text) or None.
+) -> tuple[int, str, str, bool] | None:
+    """Select a word and prompt the LLM. Returns (word_id, word, text,
+    is_intro) or None.
 
-    `names`, when non-empty, restricts the candidate pool via
+    When the push lands on an introduction slot (`is_intro_slot`) and the
+    chat has introduction-phase words, the word comes from
+    `vocab.select_intro_word` — deliberately ignoring `names`, so freshly
+    added unlabelled words surface even under an active /focus. `is_intro`
+    is True on that path so the caller can badge the message.
+
+    Otherwise `names`, when non-empty, restricts the candidate pool via
     `vocab.select_word`. `mode="all"` (default) requires every label;
     `mode="any"` requires at least one. A filter that yields zero matches
     returns None — the caller logs and skips the push.
@@ -120,13 +164,18 @@ async def compose_push(
     better than dropping the push.
     """
     chat_row = conn.execute(
-        "SELECT tone FROM chats WHERE chat_id = ?", (chat_id,)
+        "SELECT tone, tz FROM chats WHERE chat_id = ?", (chat_id,)
     ).fetchone()
     if chat_row is None:
         return None
-    picked = vocab.select_word(
-        conn, chat_id, names=names, mode=mode, rng=rng, now=now
-    )
+    picked = None
+    if is_intro_slot(conn, chat_id, chat_row["tz"], now=now):
+        picked = vocab.select_intro_word(conn, chat_id, rng=rng, now=now)
+    is_intro = picked is not None
+    if picked is None:
+        picked = vocab.select_word(
+            conn, chat_id, names=names, mode=mode, rng=rng, now=now
+        )
     if picked is None:
         return None
 
@@ -137,7 +186,7 @@ async def compose_push(
         text = await llm_chat(prompts.push_messages(word, tone, rng=rng))
         if word in text.lower():
             break
-    return picked["id"], word, text
+    return picked["id"], word, text, is_intro
 
 
 async def compose_explanation(
