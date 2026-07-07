@@ -403,29 +403,3 @@ def test_main_does_not_register_irregulars_handler() -> None:  # AC11 — source
     assert "CommandHandler('irregulars'" not in src, (
         "AC11: main() must not register CommandHandler('irregulars', ...)"
     )
-
-
-# === AC12 — on_play_game post-forgot picker stays 2-button ===================
-
-
-def test_on_play_game_picker_excludes_irr(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC12 — post-forgot 🎮 button keeps gm:wt + gm:tw only (no gm:irr)
-    _patch_bot(monkeypatch, conn)
-    _seed_translatable(
-        conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
-    )
-    update = _make_callback_update("pg:start")
-
-    asyncio.run(bot.on_play_game(update, _make_context([])))
-
-    update.callback_query.message.reply_text.assert_called_once()
-    call = update.callback_query.message.reply_text.call_args
-    btns = _picker_buttons(call.kwargs.get("reply_markup"))
-    cbs = {b.callback_data for b in btns}
-    assert cbs == {"gm:wt", "gm:tw"}, (
-        f"AC12: on_play_game picker must remain exactly gm:wt + gm:tw; got {cbs}"
-    )
-    assert "gm:irr" not in cbs, (
-        f"AC12: gm:irr must NOT be added to the post-forgot picker; got {cbs}"
-    )

@@ -5,9 +5,8 @@ wrapper that owns the AsyncIOScheduler. Production dispatch (sending on
 Telegram, attaching rating buttons) is injected by `bot.py` so this module
 stays free of telegram imports.
 
-`plan_push_times` picks randomized times inside the active window using
-equal-sized buckets with a half-gap buffer at bucket edges — so consecutive
-pushes can't cluster against the boundary.
+`plan_session_time` picks one randomized time inside the active window,
+sampling only the remaining window when called mid-day (restart-safe).
 
 `compose_session` builds the once-daily cloze-story session: select the
 day's words, prompt the LLM for a story, retry once if any word didn't
@@ -18,7 +17,6 @@ message is the caller's job so bot.py can include the Telegram message id.
 from __future__ import annotations
 
 import datetime
-import html
 import json
 import logging
 import random
@@ -38,61 +36,9 @@ import vocab
 
 log = logging.getLogger(__name__)
 
-# Minimum gap between consecutive pushes (minutes). Enforced implicitly by the
-# bucket algorithm below. Only relevant when more than one push is planned;
-# the daily cloze session plans a single time, where this is a no-op.
-MIN_GAP_MIN = 45
-
-
 def _parse_hm(s: str) -> tuple[int, int]:
     h, m = s.split(":")
     return int(h), int(m)
-
-
-def plan_push_times(
-    date: datetime.date,
-    tz: str,
-    pushes_per_day: int,
-    active_start: str,
-    active_end: str,
-    *,
-    rng: random.Random | None = None,
-    min_gap_min: int = MIN_GAP_MIN,
-) -> list[datetime.datetime]:
-    """Pick `pushes_per_day` tz-aware datetimes within the active window.
-
-    Divides the window into equal buckets and samples one point per bucket
-    with a half-gap buffer at each bucket edge. Returns [] if the window is
-    zero-length or negative.
-    """
-    rng = rng or random
-    zone = ZoneInfo(tz)
-    sh, sm = _parse_hm(active_start)
-    eh, em = _parse_hm(active_end)
-    start = datetime.datetime.combine(date, datetime.time(sh, sm), tzinfo=zone)
-    end = datetime.datetime.combine(date, datetime.time(eh, em), tzinfo=zone)
-    # "00:00" as active_end means end-of-day (the 24:00 boundary), not the
-    # same day's midnight — roll it forward one day so the window is positive.
-    if (eh, em) == (0, 0):
-        end += datetime.timedelta(days=1)
-    window_min = int((end - start).total_seconds() // 60)
-    if window_min <= 0 or pushes_per_day <= 0:
-        return []
-
-    bucket = window_min / pushes_per_day
-    half_gap = min_gap_min / 2 if bucket > min_gap_min else 0.0
-
-    times: list[datetime.datetime] = []
-    for i in range(pushes_per_day):
-        lo = int(i * bucket + half_gap)
-        hi = int((i + 1) * bucket - half_gap) - 1
-        if hi < lo:
-            # Bucket too tight for the buffer; place at bucket center.
-            off = int(i * bucket + bucket / 2)
-        else:
-            off = rng.randint(lo, hi)
-        times.append(start + datetime.timedelta(minutes=off))
-    return times
 
 
 def plan_session_time(
@@ -106,16 +52,17 @@ def plan_session_time(
 ) -> datetime.datetime | None:
     """One uniform-random minute inside the active window, strictly after `now`.
 
-    Unlike the fixed roll in `plan_push_times`, a mid-window `now` (bot
-    restarted after the original slot passed) samples the *remaining* window
-    instead of dropping the day. Returns None when the window has already
-    closed (or is empty).
+    A mid-window `now` (bot restarted after the original slot passed) samples
+    the *remaining* window instead of dropping the day. Returns None when the
+    window has already closed (or is empty).
     """
     zone = ZoneInfo(tz)
     sh, sm = _parse_hm(active_start)
     eh, em = _parse_hm(active_end)
     start = datetime.datetime.combine(date, datetime.time(sh, sm), tzinfo=zone)
     end = datetime.datetime.combine(date, datetime.time(eh, em), tzinfo=zone)
+    # "00:00" as active_end means end-of-day (the 24:00 boundary), not the
+    # same day's midnight — roll it forward one day so the window is positive.
     if (eh, em) == (0, 0):
         end += datetime.timedelta(days=1)
     now = now or datetime.datetime.now(zone)
@@ -158,9 +105,8 @@ def sent_today(
     return sent.astimezone(zone).date() == now.date()
 
 
-# Injected type aliases for clarity.
+# Injected type alias for clarity.
 LlmChat = Callable[[list[dict]], Awaitable[str]]
-TranslateFn = Callable[[str, str], Awaitable[str]]
 
 
 async def compose_session(
@@ -254,51 +200,6 @@ async def compose_explanation(
         return None
     text = (await llm_chat(prompts.explain_messages(row["text"]))).strip()
     return text or None
-
-
-async def compose_translation(
-    conn: sqlite3.Connection,
-    word_id: int,
-    target: str,
-    *,
-    translate_fn: TranslateFn,
-) -> str | None:
-    """Translate the rated word into `target` (ISO code) for the ❌-forgot reply.
-
-    Mirrors `compose_explanation`'s contract: returns the stripped translation,
-    or None when the word is gone or the result is empty. Callers wrap the
-    sync `translator.translate` in `asyncio.to_thread` to satisfy `translate_fn`.
-    """
-    row = conn.execute(
-        "SELECT text FROM words WHERE id = ?", (word_id,)
-    ).fetchone()
-    if row is None:
-        return None
-    text = (await translate_fn(row["text"], target)).strip()
-    return text or None
-
-
-# Visual divider between the LLM explanation and the single-word translation.
-# A box-drawing rule keeps the two sections distinct without leaning on emoji.
-_EXPLAIN_DIVIDER = "──────────"
-
-
-def format_explanation_reply(
-    explanation_html: str, translation: str | None
-) -> str:
-    """Compose the ❌-forgot reply body — explanation, then optional translation.
-
-    `explanation_html` is already HTML-safe (typically from `vocab.highlight_matches`).
-    `translation` is plain text and gets HTML-escaped here. When translation is
-    None or empty the reply is just the explanation, unchanged.
-    """
-    if not translation:
-        return explanation_html
-    return (
-        f"{explanation_html}\n\n"
-        f"{_EXPLAIN_DIVIDER}\n"
-        f"<i>{html.escape(translation)}</i>"
-    )
 
 
 def log_push(

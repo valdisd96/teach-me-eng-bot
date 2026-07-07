@@ -7,9 +7,8 @@ On `correct=True`, `weight` is added to `words.remembered_streak`. On
 word_ids raise `KeyError`. The `source` argument is contractual (for future
 hooks) but produces no state beyond the column update this cycle.
 
-Bot-side integration tests cover the two call sites — `on_rate` (push,
-weight=1.0) and `on_game_answer` (game, weight=0.5) — using the same mocking
-pattern as `test_play_game_button.py`.
+Bot-side integration tests cover the `on_game_answer` call site (game,
+weight=0.5) with Telegram Update/Context mocked at the architectural seam.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
 
 import bot  # noqa: E402  (env var must be set first)
 import games as games_module  # noqa: E402
-import scheduler as sched_module  # noqa: E402
 import vocab  # noqa: E402
 
 
@@ -198,115 +196,6 @@ def test_record_outcome_many_sequential_increments_sum_exactly(
         )
     assert _streak(conn, word_id) == 10.0, (
         f"AC9 — 10 sequential +1.0 outcomes must sum to 10.0; got {_streak(conn, word_id)}"
-    )
-
-
-# -- AC10 — bot.on_rate fans into record_outcome -----------------------------
-
-
-def _make_rate_update(verdict: str, push_id: int, word_id: int) -> MagicMock:
-    update = MagicMock()
-    update.callback_query.data = f"rate:{verdict}:{push_id}:{word_id}"
-    update.callback_query.answer = AsyncMock()
-    update.callback_query.message.reply_text = AsyncMock()
-    update.callback_query.edit_message_reply_markup = AsyncMock()
-    update.effective_chat.id = CHAT
-    update.effective_user.id = 1
-    update.effective_user.is_bot = False
-    return update
-
-
-def _seed_push(conn: sqlite3.Connection, word_id: int) -> int:
-    return sched_module.log_push(
-        conn, CHAT, tg_message_id=None, word_ids=[word_id]
-    )
-
-
-def _patch_bot_for_rate(
-    monkeypatch: pytest.MonkeyPatch,
-    conn: sqlite3.Connection,
-) -> dict[str, MagicMock]:
-    """Stub the side-effect seams in on_rate so the test isolates the
-    record_outcome call. Returns the spies for assertion."""
-    monkeypatch.setattr(bot, "conn", conn)
-    bot.games.clear()
-
-    rate_word_spy = MagicMock(wraps=vocab.rate_word)
-    record_outcome_spy = MagicMock(wraps=vocab.record_outcome)
-    explanation_spy = AsyncMock(return_value=None)  # short-circuit Again branch
-    mark_rated_spy = MagicMock()
-
-    monkeypatch.setattr(bot.vocab, "rate_word", rate_word_spy)
-    monkeypatch.setattr(bot.vocab, "record_outcome", record_outcome_spy)
-    monkeypatch.setattr(bot.sched_module, "compose_explanation", explanation_spy)
-    monkeypatch.setattr(bot.sched_module, "mark_rated", mark_rated_spy)
-
-    return {
-        "rate_word": rate_word_spy,
-        "record_outcome": record_outcome_spy,
-        "mark_rated": mark_rated_spy,
-    }
-
-
-def test_on_rate_good_calls_record_outcome_correct_push(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC10 — verdict=good → record_outcome(True, 1.0, "push") + rate_word
-    spies = _patch_bot_for_rate(monkeypatch, conn)
-    word_id = _add_word(conn)
-    push_id = _seed_push(conn, word_id)
-    update = _make_rate_update("good", push_id, word_id)
-
-    asyncio.run(bot.on_rate(update, MagicMock()))
-
-    assert spies["record_outcome"].call_count == 1, (
-        f"AC10 — record_outcome must be called exactly once on verdict=good; "
-        f"got {spies['record_outcome'].call_count} calls"
-    )
-    call = spies["record_outcome"].call_args
-    # Args may come positionally or as kwargs; normalise.
-    bound = _bind_record_outcome(call)
-    assert bound["word_id"] == word_id, (
-        f"AC10 — record_outcome must receive the rated word_id; got {bound!r}"
-    )
-    assert bound["correct"] is True, (
-        f"AC10 — verdict=good must produce correct=True; got {bound!r}"
-    )
-    assert bound["weight"] == 1.0, (
-        f"AC10 — push outcomes use weight=1.0; got {bound!r}"
-    )
-    assert bound["source"] == "push", (
-        f"AC10 — source must be 'push'; got {bound!r}"
-    )
-    assert spies["rate_word"].called, (
-        "AC10 — vocab.rate_word must still be called (FSRS path unchanged)"
-    )
-
-
-def test_on_rate_again_calls_record_outcome_wrong_push(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC10 — verdict=again → record_outcome(False, 1.0, "push") + rate_word
-    spies = _patch_bot_for_rate(monkeypatch, conn)
-    word_id = _add_word(conn)
-    push_id = _seed_push(conn, word_id)
-    update = _make_rate_update("again", push_id, word_id)
-
-    asyncio.run(bot.on_rate(update, MagicMock()))
-
-    assert spies["record_outcome"].call_count == 1, (
-        f"AC10 — record_outcome must be called exactly once on verdict=again; "
-        f"got {spies['record_outcome'].call_count} calls"
-    )
-    bound = _bind_record_outcome(spies["record_outcome"].call_args)
-    assert bound["word_id"] == word_id
-    assert bound["correct"] is False, (
-        f"AC10 — verdict=again must produce correct=False; got {bound!r}"
-    )
-    assert bound["weight"] == 1.0, (
-        f"AC10 — push outcomes use weight=1.0; got {bound!r}"
-    )
-    assert bound["source"] == "push"
-    assert spies["rate_word"].called, (
-        "AC10 — vocab.rate_word must still be called on verdict=again"
     )
 
 

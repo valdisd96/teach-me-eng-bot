@@ -1,9 +1,9 @@
-"""Prompt templates for scheduled pushes and just-talk replies.
+"""Prompt templates for the daily story session and just-talk replies.
 
-Pushes and chat replies share one style rule: answers should be at most 1–2
-short paragraphs. Push prompts additionally require the target vocab word to
-appear literally (used by the scheduler's retry-once check) and demand simple
-learner-level English so the word's meaning is guessable from the context.
+Stories and chat replies share one style rule: keep it short. The story
+prompt additionally requires every vocab word to appear literally (used by
+the scheduler's retry-once check) and demands simple learner-level English
+so each word's meaning is guessable from the context.
 """
 
 from __future__ import annotations
@@ -18,20 +18,6 @@ _TONE_INSTRUCTIONS: dict[str, str] = {
     "scary": "Write a slightly spooky everyday moment — mild, not graphic.",
     "bright": "Write a cheerful, concrete everyday scene.",
 }
-
-_PUSH_SYSTEM = (
-    "You write one tiny English snippet that helps a learner understand a "
-    "given vocabulary word. "
-    "The target word MUST appear literally in your reply (same spelling, "
-    "case-insensitive) — never replace it with a synonym, even if it is rare "
-    "or advanced. "
-    "Around it, use simple, everyday English (CEFR A2–B1 level): only common, "
-    "easy words and plain grammar. "
-    "Keep it to 1–2 short sentences, at most 25 words total. "
-    "Build the snippet around a clear, concrete situation so that someone who "
-    "has never seen the target word can guess its meaning from the context. "
-    "No headings, no quotes, no explanation — just the snippet."
-)
 
 _EXPLAIN_SYSTEM = (
     "You are a concise English tutor. In ONE short sentence, explain in plain "
@@ -63,29 +49,6 @@ def resolve_tone(tone: str, rng: random.Random | None = None) -> str:
     if tone not in _TONE_INSTRUCTIONS:
         raise ValueError(f"unknown tone: {tone!r}")
     return tone
-
-
-def push_messages(
-    word: str,
-    tone: str,
-    *,
-    rng: random.Random | None = None,
-) -> list[dict]:
-    """Build the messages payload for a scheduled push using `word`."""
-    resolved = resolve_tone(tone, rng=rng)
-    return [
-        {
-            "role": "system",
-            "content": f"{_PUSH_SYSTEM}\n{_TONE_INSTRUCTIONS[resolved]}",
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Word to use: {word}\n"
-                f'Remember: the exact word "{word}" must appear in the snippet.'
-            ),
-        },
-    ]
 
 
 _STORY_SYSTEM = (
@@ -135,8 +98,8 @@ def story_messages(
 def explain_messages(word: str) -> list[dict]:
     """Build messages asking for a brief meaning + one example for `word`.
 
-    Used when the user taps ❌ forgot on a push — we follow up with a tiny
-    definition so they can learn it on the spot.
+    Used when the user taps 💡 explain under a story result's missed word —
+    a tiny definition so they can learn it on the spot.
     """
     return [
         {"role": "system", "content": _EXPLAIN_SYSTEM},

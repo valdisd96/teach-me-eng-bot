@@ -650,43 +650,6 @@ def test_on_games_menu_stale_tap_uses_current_stash(
     )
 
 
-# === on_play_game — clears the stash (AC7) ==================================
-
-
-def test_on_play_game_clears_pending_filter(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC7 — on_play_game pops stash; the resulting game is unfiltered
-    _patch_bot(monkeypatch, conn)
-    _seed_translatable(
-        conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
-    )
-    bot.pending_game_filters[CHAT] = ("all", ["pos:noun"])
-
-    update = _make_callback_update("pg:start")
-    asyncio.run(bot.on_play_game(update, _make_context([])))
-
-    assert CHAT not in bot.pending_game_filters, (
-        "AC7: on_play_game must clear the stash so the resulting game starts unfiltered; "
-        f"got {bot.pending_game_filters!r}"
-    )
-
-
-def test_on_play_game_clears_filter_when_none_set(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:  # AC7 — pop is idempotent when no entry exists
-    _patch_bot(monkeypatch, conn)
-    _seed_translatable(
-        conn, CHAT, [f"w{i}" for i in range(games_module.MIN_VOCAB)]
-    )
-    assert CHAT not in bot.pending_game_filters
-
-    update = _make_callback_update("pg:start")
-    # Must not raise even though there's nothing to pop.
-    asyncio.run(bot.on_play_game(update, _make_context([])))
-
-    assert CHAT not in bot.pending_game_filters
-
-
 # === COMMANDS surface =======================================================
 
 

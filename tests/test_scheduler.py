@@ -1,4 +1,4 @@
-"""Tests for scheduler.py planning core + push composer.
+"""Tests for scheduler.py session composer + push_log helpers.
 
 APScheduler glue (PushRunner) is exercised lightly — we check job
 registration/removal without actually running the loop.
@@ -7,7 +7,6 @@ registration/removal without actually running the loop.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import random
 import sqlite3
 
@@ -19,130 +18,6 @@ import vocab
 
 
 CHAT = 700
-UTC = datetime.timezone.utc
-
-
-# --- plan_push_times ---------------------------------------------------------
-
-
-def test_plan_returns_empty_if_window_non_positive() -> None:
-    assert scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        3,
-        "21:00",
-        "09:00",
-    ) == []
-
-
-def test_plan_treats_midnight_end_as_end_of_day() -> None:
-    # active_end="00:00" should mean the 24:00 boundary, not the same day's
-    # midnight (which would make the window negative and return []).
-    times = scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        8,
-        "13:00",
-        "00:00",
-        rng=random.Random(0),
-    )
-    assert len(times) == 8
-    start = datetime.datetime(2026, 4, 22, 13, 0, tzinfo=UTC)
-    end = datetime.datetime(2026, 4, 23, 0, 0, tzinfo=UTC)
-    for t in times:
-        assert start <= t <= end
-
-
-def test_plan_returns_empty_for_zero_pushes() -> None:
-    assert scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        0,
-        "09:00",
-        "21:00",
-    ) == []
-
-
-def test_plan_produces_requested_count() -> None:
-    times = scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        4,
-        "09:00",
-        "21:00",
-        rng=random.Random(0),
-    )
-    assert len(times) == 4
-
-
-def test_plan_times_are_in_window_and_sorted() -> None:
-    rng = random.Random(0)
-    times = scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        5,
-        "09:00",
-        "21:00",
-        rng=rng,
-    )
-    # All tz-aware UTC, strictly inside the window
-    start = datetime.datetime(2026, 4, 22, 9, 0, tzinfo=UTC)
-    end = datetime.datetime(2026, 4, 22, 21, 0, tzinfo=UTC)
-    for t in times:
-        assert start <= t <= end
-    # Sorted by construction (bucket index is monotonically increasing)
-    assert times == sorted(times)
-
-
-def test_plan_respects_min_gap_when_window_allows() -> None:
-    rng = random.Random(1)
-    times = scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        4,
-        "09:00",
-        "21:00",  # 12h window → 180-min bucket, gap well above MIN_GAP_MIN
-        rng=rng,
-        min_gap_min=45,
-    )
-    gaps = [(b - a).total_seconds() / 60 for a, b in zip(times, times[1:])]
-    assert min(gaps) >= 45
-
-
-def test_plan_degrades_gracefully_on_tight_window() -> None:
-    # 60-min window, 3 pushes — bucket=20min, cannot satisfy 45-min gap.
-    # Should still produce 3 ordered times without raising.
-    times = scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        3,
-        "09:00",
-        "10:00",
-        rng=random.Random(0),
-        min_gap_min=45,
-    )
-    assert len(times) == 3
-    assert times == sorted(times)
-
-
-def test_plan_is_deterministic_with_seeded_rng() -> None:
-    a = scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        3,
-        "09:00",
-        "21:00",
-        rng=random.Random(42),
-    )
-    b = scheduler.plan_push_times(
-        datetime.date(2026, 4, 22),
-        "UTC",
-        3,
-        "09:00",
-        "21:00",
-        rng=random.Random(42),
-    )
-    assert a == b
 
 
 # --- compose_session ---------------------------------------------------------
@@ -334,96 +209,6 @@ def test_compose_explanation_returns_none_on_empty_llm_reply(conn: sqlite3.Conne
         scheduler.compose_explanation(conn, row["id"], llm_chat=llm_blank)
     )
     assert out is None
-
-
-# --- compose_translation -----------------------------------------------------
-
-
-def test_compose_translation_returns_stripped_text(conn: sqlite3.Connection) -> None:
-    _seed_chat(conn)
-    vocab.add_word(conn, CHAT, "ephemeral")
-    row = conn.execute(
-        "SELECT id FROM words WHERE chat_id = ?", (CHAT,)
-    ).fetchone()
-
-    seen: list[tuple[str, str]] = []
-
-    async def fake_translate(word: str, target: str) -> str:
-        seen.append((word, target))
-        return "  эфемерный  \n"
-
-    out = asyncio.run(
-        scheduler.compose_translation(
-            conn, row["id"], "ru", translate_fn=fake_translate
-        )
-    )
-    assert out == "эфемерный"
-    assert seen == [("ephemeral", "ru")]
-
-
-def test_compose_translation_returns_none_for_unknown_word(conn: sqlite3.Connection) -> None:
-    async def fake_translate(word: str, target: str) -> str:
-        raise AssertionError("translator should not be called")
-
-    out = asyncio.run(
-        scheduler.compose_translation(
-            conn, 99999, "ru", translate_fn=fake_translate
-        )
-    )
-    assert out is None
-
-
-def test_compose_translation_returns_none_on_empty_result(conn: sqlite3.Connection) -> None:
-    _seed_chat(conn)
-    vocab.add_word(conn, CHAT, "placid")
-    row = conn.execute(
-        "SELECT id FROM words WHERE chat_id = ?", (CHAT,)
-    ).fetchone()
-
-    async def fake_blank(word: str, target: str) -> str:
-        return "  \n"
-
-    out = asyncio.run(
-        scheduler.compose_translation(
-            conn, row["id"], "ru", translate_fn=fake_blank
-        )
-    )
-    assert out is None
-
-
-# --- format_explanation_reply ------------------------------------------------
-
-
-def test_format_explanation_reply_without_translation_is_passthrough() -> None:
-    assert (
-        scheduler.format_explanation_reply("Means lasting briefly.", None)
-        == "Means lasting briefly."
-    )
-    # Empty string is treated like None — no divider noise on a missing translation.
-    assert (
-        scheduler.format_explanation_reply("Means lasting briefly.", "")
-        == "Means lasting briefly."
-    )
-
-
-def test_format_explanation_reply_appends_divider_and_translation() -> None:
-    out = scheduler.format_explanation_reply(
-        "Means <b>lasting</b> briefly.", "эфемерный"
-    )
-    # Two blank lines + a horizontal rule visually separate the two blocks.
-    assert out == (
-        "Means <b>lasting</b> briefly.\n\n"
-        "──────────\n"
-        "<i>эфемерный</i>"
-    )
-
-
-def test_format_explanation_reply_escapes_translation_html() -> None:
-    out = scheduler.format_explanation_reply("ok", "<script>x</script>")
-    # The translation must be HTML-escaped — Telegram parses the reply as HTML
-    # and a stray '<' would either fail to render or be interpreted as a tag.
-    assert "&lt;script&gt;x&lt;/script&gt;" in out
-    assert "<script>" not in out
 
 
 # --- log_push / mark_rated ---------------------------------------------------

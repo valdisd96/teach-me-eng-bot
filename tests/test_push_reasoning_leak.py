@@ -1,4 +1,4 @@
-"""Scheduled pushes and ❌-forgot explanations must disable model reasoning.
+"""Scheduled sessions and 💡-explain follow-ups must disable model reasoning.
 
 The openrouter/free auto-router sometimes routes these calls to reasoning
 models whose chain-of-thought either consumes the whole max_tokens budget
@@ -83,7 +83,7 @@ def test_dispatch_push_disables_reasoning(
     assert all(c.get("disable_reasoning") is True for c in calls)
 
 
-def test_on_rate_explanation_disables_reasoning(
+def test_on_explain_disables_reasoning(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed_chat(conn)
@@ -92,27 +92,23 @@ def test_on_rate_explanation_disables_reasoning(
         "SELECT id FROM words WHERE chat_id = ?", (CHAT,)
     ).fetchone()
     word_id = row["id"]
-    push_id = bot.sched_module.log_push(
-        conn, CHAT, tg_message_id=1, word_ids=[word_id]
-    )
     calls = _capture_llm_chat(monkeypatch, "lasting a very short time")
 
     monkeypatch.setattr(bot, "conn", conn)
     monkeypatch.setattr(bot, "append_turn", lambda *a, **k: None)
-    # ❌-forgot follow-ups also translate the word — not under test here.
-    monkeypatch.setattr(
-        bot.translator, "translate", lambda *a, **k: "эфемерный", raising=False
-    )
 
     update = MagicMock()
     update.effective_chat.id = CHAT
-    update.callback_query.data = f"rate:again:{push_id}:{word_id}"
+    update.effective_user.id = 1
+    update.effective_user.is_bot = False
+    update.callback_query.data = f"exp:{word_id}"
     update.callback_query.answer = AsyncMock()
-    update.callback_query.edit_message_reply_markup = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
     ctx = MagicMock()
     ctx.bot.send_message = AsyncMock()
 
-    asyncio.run(bot.on_rate(update, ctx))
+    asyncio.run(bot.on_explain(update, ctx))
 
-    assert calls, "the ❌-forgot explanation must reach the LLM"
+    assert calls, "the 💡 explain follow-up must reach the LLM"
     assert all(c.get("disable_reasoning") is True for c in calls)
+    update.callback_query.message.reply_text.assert_awaited_once()
