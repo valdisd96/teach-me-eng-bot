@@ -278,6 +278,8 @@ def test_cmd_add_propagates_value_error_as_warning_reply(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # edge: vocab.add_word ValueError → ⚠️ reply, no suggestion follow-up
     _patch_bot(monkeypatch, conn)
+    # Neutralize the /add spell-check so the fake word reaches add_word.
+    monkeypatch.setattr(bot.spelling, "suggest", lambda w: None)
 
     def boom(*_args, **_kwargs):
         raise ValueError("nope")
