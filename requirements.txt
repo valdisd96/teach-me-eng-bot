@@ -4,3 +4,4 @@ python-dotenv>=1.0.0
 fsrs>=6.3
 APScheduler>=3.10
 deep-translator>=1.11
+pyspellchecker>=0.8

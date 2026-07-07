@@ -51,6 +51,7 @@ import irregular_verbs as irregular_module
 import llm
 import prompts
 import scheduler as sched_module
+import spelling
 import sysinfo
 import translator
 import typed_drill
@@ -507,12 +508,38 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         await update.message.reply_text("Usage: /add <word or phrase>")
         return
+    normalized = text.strip().lower()
+    # Spell-check new single words before they enter the vocab — a typo here
+    # gets force-woven into every future story. Dictionary only, no LLM
+    # (issue #101); any checker failure falls through to a normal add.
+    if vocab.find_word_id(conn, chat_id, normalized) is None:
+        try:
+            suggestion = await asyncio.to_thread(spelling.suggest, normalized)
+        except Exception as e:  # noqa: BLE001
+            log.warning("spell-check failed for %r: %s", normalized, e)
+            suggestion = None
+        if suggestion:
+            fixed_token = pending_vocab.register(chat_id, suggestion)
+            asis_token = pending_vocab.register(chat_id, normalized)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"✅ Add “{suggestion}”", callback_data=f"av:{fixed_token}"
+                )],
+                [InlineKeyboardButton(
+                    f"Add “{normalized}” anyway", callback_data=f"av:{asis_token}"
+                )],
+            ])
+            await update.message.reply_text(
+                f'🤔 "{normalized}" isn\'t in my dictionary — '
+                f'did you mean "{suggestion}"?',
+                reply_markup=kb,
+            )
+            return
     try:
         added = vocab.add_word(conn, chat_id, text)
     except ValueError as e:
         await update.message.reply_text(f"⚠️ {e}")
         return
-    normalized = text.strip().lower()
     if added:
         # Eagerly translate so future games never need a network call.
         # Failure here mustn't block the user-facing reply — backfill on next

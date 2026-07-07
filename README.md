@@ -15,7 +15,7 @@ A [python-telegram-bot](https://python-telegram-bot.org) app talking to any Open
 | `/start` | Guided config: timezone → pushes/day (6–12) → active window → tone (funny / motivational / scary / bright / mixed) → translate target language. Re-running overwrites settings; vocab is preserved. |
 | `/help` | Lists all commands with descriptions. |
 | `/clear` | Resets the chat's LLM history. Vocab and settings untouched. |
-| `/add <word or phrase>` | Add a word to this chat's vocab. |
+| `/add <word or phrase>` | Add a word to this chat's vocab. Misspelled single words get a "did you mean …?" prompt with buttons to add the correction or your spelling as typed. |
 | `/remove <word or phrase>` | Remove by exact match. |
 | `/list [--any] [<spec>...]` | List vocab (least-mentioned first); every row shows its labels. With one or more label tokens, restrict to words tagged with **all** of them (AND); prepend `--any` for OR. Long lists spill across multiple Telegram messages. See [Labels](#labels). |
 | `/import` | Bulk-import from a CSV upload (5-min window, capped at 5000 rows / 1 MB). Columns: `text` (required), optional `translation`, optional `labels` (`;`-separated names). The `text,translation,labels` header opts in to the three-column round-trip; bare-list and `text,translation` formats remain accepted. Existing words preserved; in-file duplicates skipped; label sets are merged additively. FSRS state not imported. |
