@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import os
 import random
 import sqlite3
@@ -102,52 +103,57 @@ def _last_reply(reply_text_mock: MagicMock) -> str:
     return call.args[0] if call.args else call.kwargs["text"]
 
 
-# --- cloze.classify_answer -----------------------------------------------------
+# --- cloze.resolve_answers -----------------------------------------------------
 
 
-def test_classify_bank_word_is_answer() -> None:
+def _single(answers: list[cloze.Answer] | None) -> cloze.Answer:
+    assert answers is not None and len(answers) == 1
+    return answers[0]
+
+
+def test_resolve_bank_word_is_answer() -> None:
     s = _session([(1, "horse"), (2, "potent")])
-    assert cloze.classify_answer("horse", s) == "answer"
-    assert cloze.classify_answer("  Potent ", s) == "answer"
+    assert _single(cloze.resolve_answers("horse", s)).is_skip is False
+    a = _single(cloze.resolve_answers("  Potent ", s))
+    assert a.is_skip is False and a.blank_index == s.current_blank
 
 
-def test_classify_to_prefix_normalized() -> None:
+def test_resolve_to_prefix_normalized() -> None:
     s = _session([(1, "to run out of")])
-    assert cloze.classify_answer("run out of", s) == "answer"
+    assert _single(cloze.resolve_answers("run out of", s)).is_skip is False
 
 
-def test_classify_skip_tokens() -> None:
+def test_resolve_skip_tokens() -> None:
     s = _session([(1, "horse")])
-    assert cloze.classify_answer("skip", s) == "skip"
-    assert cloze.classify_answer(" SKIP ", s) == "skip"
-    assert cloze.classify_answer("?", s) == "skip"
+    for text in ("skip", " SKIP ", "?"):
+        assert _single(cloze.resolve_answers(text, s)).is_skip is True, text
 
 
-def test_classify_punctuated_bank_word_is_answer() -> None:
+def test_resolve_punctuated_bank_word_is_answer() -> None:
     # Surrounding punctuation is stripped by the answer normalizer, so a
     # typed "horse." still counts as the bank word.
     s = _session([(1, "horse")])
-    assert cloze.classify_answer("horse.", s) == "answer"
-    assert cloze.classify_answer("Horse!", s) == "answer"
+    assert _single(cloze.resolve_answers("horse.", s)).is_skip is False
+    assert _single(cloze.resolve_answers("Horse!", s)).is_skip is False
 
 
-def test_classify_bare_question_mark_stays_skip() -> None:
+def test_resolve_bare_question_mark_stays_skip() -> None:
     # "?" must be recognised on the raw text — the punctuation-tolerant
     # normalizer would reduce it to "" and misroute the skip.
     s = _session([(1, "horse")])
-    assert cloze.classify_answer("?", s) == "skip"
-    assert cloze.classify_answer(" ? ", s) == "skip"
+    assert _single(cloze.resolve_answers("?", s)).is_skip is True
+    assert _single(cloze.resolve_answers(" ? ", s)).is_skip is True
 
 
-def test_classify_stray_text_is_other() -> None:
+def test_resolve_stray_text_is_none() -> None:
     s = _session([(1, "horse")])
-    assert cloze.classify_answer("hi, what does horse mean??", s) == "other"
-    assert cloze.classify_answer("horze", s) == "other"  # typo ≠ silent Again
+    assert cloze.resolve_answers("hi, what does horse mean??", s) is None
+    assert cloze.resolve_answers("horze", s) is None  # typo ≠ silent Again
 
 
 def test_not_answer_hint_names_current_blank() -> None:
     s = _session([(1, "horse"), (2, "potent")])
-    s.current_blank = 1
+    cloze.apply_answer(s, 0, True)
     hint = cloze.format_not_answer_hint(s)
     assert "(2)" in hint and "skip" in hint
 
@@ -162,12 +168,35 @@ def test_blank_prompt_mentions_skip() -> None:
 
 def test_session_json_roundtrip_preserves_progress() -> None:
     s = _session([(7, "horse"), (9, "potent")], push_id=42)
-    cloze.apply_answer(s, False)  # miss the first blank
+    cloze.apply_answer(s, 0, False)  # miss the first blank
     restored = cloze.session_from_json(cloze.session_to_json(s))
     assert restored == s
     assert restored.current_blank == 1
     assert restored.wrong == [s.blanks[0].word]
     assert restored.push_id == 42
+
+
+def test_session_json_roundtrip_preserves_out_of_order_progress() -> None:
+    s = _session([(7, "horse"), (9, "potent"), (11, "brave")], push_id=42)
+    cloze.apply_answer(s, 1, True)  # blank 2 answered first
+    restored = cloze.session_from_json(cloze.session_to_json(s))
+    assert restored == s
+    assert restored.answered == [1]
+    assert restored.remaining == [0, 2]
+
+
+def test_session_from_json_migrates_legacy_current_blank() -> None:
+    # In-flight sessions serialized before out-of-order answers carry a
+    # sequential `current_blank` pointer instead of `answered` — a deploy
+    # mid-story must not lose progress.
+    s = _session([(7, "horse"), (9, "potent")], push_id=42)
+    legacy = json.loads(cloze.session_to_json(s))
+    del legacy["answered"]
+    legacy["current_blank"] = 1
+    restored = cloze.session_from_json(json.dumps(legacy))
+    assert restored.answered == [0]
+    assert restored.current_blank == 1
+    assert restored.done is False
 
 
 # --- scheduler.plan_session_time ------------------------------------------------
@@ -467,6 +496,23 @@ def test_correct_answer_persists_progress(
     payload = scheduler.load_unfinished_session_json(conn, CHAT, "UTC")
     assert payload is not None
     assert cloze.session_from_json(payload).current_blank == 1
+
+
+def test_batch_out_of_order_answers_grade_every_blank(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bot, "conn", conn)
+    monkeypatch.setattr(bot, "safe_send", AsyncMock())
+    s = _seeded_session(conn, ["horse", "potent"])
+    word1, word2 = s.blanks[0].word, s.blanks[1].word
+    wid1, wid2 = s.blanks[0].word_id, s.blanks[1].word_id
+    # One message: blank 2 targeted explicitly, blank 1 filled by the bare word.
+    update = _make_update(text=f"2 {word2}, {word1}")
+    asyncio.run(bot.handle_message(update, _make_context()))
+    assert s.done is True and s.score == 2
+    assert _reps(conn, wid1) == 1 and _reps(conn, wid2) == 1
+    feedback = _last_reply(update.message.reply_text)
+    assert f"(2) ✅ {word2}" in feedback and f"(1) ✅ {word1}" in feedback
 
 
 def test_cancel_closes_push_row(

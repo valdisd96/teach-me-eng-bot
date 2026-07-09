@@ -428,15 +428,19 @@ HELP_TEXT = (
     "4. Optional: tag words with /label (e.g. `/label horse pos:noun "
     "type:animal`) and slice the deck with /list, /games, or /focus.\n\n"
     "*Answering the daily story*\n"
-    "The bot asks for one blank at a time — reply with the matching word "
-    "from the word bank, one message per blank.\n"
-    "• Case, extra spaces, and punctuation don't matter: `Cat.` = `cat`\n"
-    "• A leading `to` is optional: `run out of` = `to run out of`\n"
-    "• Don't know it? Send `skip` (or `?`) — a miss, the story moves on.\n"
-    "• Anything not in the word bank is never graded — a typo or chat "
-    "message can't hurt your score, the bot just re-asks.\n"
-    "Example: `I saw a ___(1) in the park.` with `dog` in the word bank — "
-    "reply `dog` (or `Dog.`) and it counts as correct.\n\n"
+    "Reply with word-bank words — all of these forms work, in any mix:\n"
+    "• `dog` — answers the current blank\n"
+    "• `4 dog` — answers blank (4) specifically, in any order\n"
+    "• `dog, run, cat` — fills the next blanks, one message\n"
+    "• `2 dog, 5 cat` — several specific blanks at once\n"
+    "• `skip` or `?` — gives up on the current blank (a miss); "
+    "works everywhere: `4 skip`, `dog, skip, cat`\n"
+    "Case, extra spaces, and punctuation don't matter (`Cat.` = `cat`), "
+    "and a leading `to` is optional (`run out of` = `to run out of`). "
+    "Anything that's not a word-bank word is never graded — a typo or "
+    "chat message can't hurt your score, the bot just re-asks.\n"
+    "Example: blanks (2) and (5) left, word bank has `dog` and `cat` — "
+    "send `2 dog, 5 cat` and the story completes.\n\n"
     "Plain (non-slash) messages chat with the model and will naturally reuse "
     "your vocab when it fits.\n\n"
     "*Commands*\n"
@@ -1463,39 +1467,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Branch 1b: daily cloze-story session in progress — interpret plain text
-    # as the answer for the current blank. Each answer applies the FSRS
-    # rating the old ✅/❌ push buttons used to (correct → Good, miss → Again).
+    # as blank answers: bare `word` (current blank), `4 word` (blank 4, any
+    # order), or several at once separated by commas. Each answer applies the
+    # FSRS rating the old ✅/❌ push buttons used to (correct → Good,
+    # miss → Again).
     cz = cloze_sessions.get(chat_id)
     if cz is not None and not cz.done:
-        kind = cloze_module.classify_answer(user_text, cz)
-        if kind == "other":
-            # Not a word-bank word and not a skip — grading it would rate an
-            # unrelated word `Again` off a stray chat message. Nudge instead.
+        answers = cloze_module.resolve_answers(user_text, cz)
+        if answers is None:
+            # Not word-bank words / skips against open blanks — grading would
+            # rate an unrelated word `Again` off a stray chat message. Nudge.
             await update.message.reply_text(
                 cloze_module.format_not_answer_hint(cz)
             )
             return
-        blank = cz.current()
-        correct = kind == "answer" and cloze_module.grade_answer(
-            user_text, blank.word
-        )
-        try:
-            vocab.rate_word(
-                conn, blank.word_id, Rating.Good if correct else Rating.Again
+        feedback: list[str] = []
+        for ans in answers:
+            blank = cz.blanks[ans.blank_index]
+            correct = not ans.is_skip and cloze_module.grade_answer(
+                ans.text, blank.word
             )
-            vocab.record_outcome(
-                conn, blank.word_id, correct=correct, weight=1.0, source="push"
+            try:
+                vocab.rate_word(
+                    conn, blank.word_id, Rating.Good if correct else Rating.Again
+                )
+                vocab.record_outcome(
+                    conn, blank.word_id, correct=correct, weight=1.0, source="push"
+                )
+            except KeyError:
+                log.warning("cloze answer: unknown word_id %s", blank.word_id)
+            cloze_module.apply_answer(cz, ans.blank_index, correct)
+            feedback.append(
+                cloze_module.format_answer_feedback(
+                    ans.blank_index + 1, correct, blank.word
+                )
             )
-        except KeyError:
-            log.warning("cloze answer: unknown word_id %s", blank.word_id)
-        cloze_module.apply_answer(cz, correct)
         if cz.push_id is not None:
             sched_module.save_session_json(
                 conn, cz.push_id, cloze_module.session_to_json(cz)
             )
-        await update.message.reply_text(
-            cloze_module.format_answer_feedback(correct, blank.word)
-        )
+        await update.message.reply_text("\n".join(feedback))
         if cz.done:
             if cz.push_id is not None:
                 sched_module.mark_rated(conn, cz.push_id)
