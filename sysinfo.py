@@ -65,8 +65,8 @@ def read_disk_free(
 def read_deploy_sha(path: str = "/var/lib/teach-me-eng-bot/deploy.json") -> str | None:
     """Return the deployed commit short SHA from the deploy manifest, or None.
 
-    The auto-deploy workflow writes this manifest on every successful deploy
-    (see .github/workflows/deploy.yml). Returns ``short_sha`` if present, else
+    The Hermes Dark Factory deploy reconciler writes this manifest on every
+    deploy (see docs/deploy.md). Returns ``short_sha`` if present, else
     the first 7 chars of ``sha``, else None. Never raises.
     """
     try:
