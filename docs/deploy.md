@@ -43,7 +43,7 @@ Restart=on-failure
 RestartSec=5
 ```
 
-- **User**: `root`. The bot's working dir, venv, and SQLite live under `/root/`. A future PR may relocate to `/srv/teach-me-eng-bot` and switch to a non-root user; until then, deploys run as root via `sudo -n` from the GitHub Actions self-hosted runner.
+- **User**: `root`. The bot's working dir, venv, and SQLite live under `/root/`. A future PR may relocate to `/srv/teach-me-eng-bot` and switch to a non-root user; until then, the Hermes Dark Factory deploy reconciler SSHes in as root.
 - **WorkingDirectory**: `/root/teach-me-eng-bot`. The bot's `Path(__file__).resolve().parent` (in `bot.py`) anchors all relative paths to this directory, so a relocation is mostly mechanical.
 - **EnvironmentFile**: `/root/teach-me-eng-bot/.env` (mode 0600, owned by root, NOT in git). Loaded by systemd; the bot does not call `python-dotenv` from inside its working dir at runtime.
 - **Restart**: `on-failure` — a clean exit (e.g. SIGTERM) does NOT auto-restart; a crash does. `RestartSec=5` means a tight crash loop is rate-limited.
@@ -67,29 +67,29 @@ The bot reads these via `os.environ` (loaded by systemd's `EnvironmentFile=`). T
 
 - **`/root/teach-me-eng-bot/data/vocab.db`** — primary SQLite database. Plus `vocab.db-shm` and `vocab.db-wal` (WAL-mode; survive restarts). Gitignored. **Must NOT be wiped on deploy.** The `git reset --hard` step in the deploy workflow does not touch gitignored files, so this is automatically preserved.
 - **`/root/teach-me-eng-bot/.env`** — secrets. Mode 0600, owner root, gitignored. Survives deploys for the same reason.
-- **`/root/teach-me-eng-bot/.venv/`** — Python virtualenv. Gitignored. Recreated only when `requirements.txt` changes (sha256-compared by the deploy workflow).
+- **`/root/teach-me-eng-bot/.venv/`** — Python virtualenv. Gitignored. Dependencies are re-installed only when `requirements.txt` changes (sha256 marker at `/var/lib/teach-me-eng-bot/requirements.sha256`, compared by the deploy reconciler).
 - **`/root/teach-me-eng-bot/logs/`** — per-conversation transcripts (one file per chat, append-only). Gitignored; bounded only by chat volume. Manual rotation.
-- **`/var/lib/teach-me-eng-bot/deploy.json`** — deploy manifest written by the deploy workflow on every successful run. Owned by `github-runner`. The fabric's `GET /api/projects/teach-me-eng-bot/deployments/latest` reads this to surface "what's running".
+- **`/var/lib/teach-me-eng-bot/deploy.json`** — deploy manifest (`{sha, short_sha, deployed_at, deployer}`) written by the Dark Factory deploy reconciler on every deploy. `/status` reads it for the deployed commit SHA, and the reconciler's drift detection treats it as the source of truth for what is running (repo HEAD is only the bootstrap fallback).
 
 ## Migrations
 
-There is **no `scripts/migrate.sh`**. SQLite schema changes happen inline in `db.py` via `init_db()` which runs at startup and is idempotent. The deploy workflow's `MIGRATE_SCRIPT` value is intentionally blank.
+There is **no `scripts/migrate.sh`**. SQLite schema changes happen inline in `db.py` via `init_db()` which runs at startup and is idempotent — a plain restart applies them.
 
-If a future change needs an explicit pre-restart migration (e.g. a backfill that takes minutes and shouldn't run from inside `bot.py`), add `scripts/migrate.sh` (idempotent, exits non-zero on failure) and set `MIGRATE_SCRIPT: scripts/migrate.sh` in `.github/workflows/deploy.yml`. Update this section in the same PR.
+If a future change needs an explicit pre-restart migration (e.g. a backfill that takes minutes and shouldn't run from inside `bot.py`), add `scripts/migrate.sh` (idempotent, exits non-zero on failure) and wire it into the factory's deploy config for this project (`deploy_after_merge` in the hermes-dark-factory registry). Update this section in the same PR.
 
 ## Deploy flow
 
-Auto-triggered on push to `main`:
+Deploys are owned by the **Hermes Dark Factory deploy reconciler** (repo `valdisd96/hermes-dark-factory`, `watchers/deploy_reconciler.py`). There is no GitHub Actions deploy workflow — the former `.github/workflows/deploy.yml` (`github_actions_on_main_push`) was retired 2026-07-09: it required a self-hosted runner that was never installed, so pushes to `main` queued forever and never deployed.
 
-1. **Self-hosted GitHub Actions runner** (registered to `valdisd96/teach-me-eng-bot`, label `deploy-target`) picks up the workflow.
-2. `sudo -n git -C /root/teach-me-eng-bot fetch && reset --hard <sha>` — gitignored files (`.env`, `data/`, `.venv/`, `logs/`) are preserved.
-3. **Conditional venv refresh**: hash-compare `requirements.txt` against `/root/teach-me-eng-bot/.venv/.requirements.sha256`. On change, `rm -rf .venv && python3 -m venv .venv && pip install -r requirements.txt`. Else reuse.
-4. `sudo -n systemctl restart teach-me-eng-bot.service`.
-5. **Smoke check** (8s grace + 60s journal scan): `systemctl is-active` must succeed AND `journalctl -u teach-me-eng-bot --since '60 seconds ago'` must be free of `ERROR`, `CRITICAL`, or `Traceback`.
-6. **On success** — write `/var/lib/teach-me-eng-bot/deploy.json`, POST manifest to fabric.
-7. **On failure** — POST failure bundle (sha + journal tail + workflow URL) to fabric. The previous broken version stays running (no auto-rollback). The fabric dispatches `deploy-diagnose`, which files a GH issue. The fix-PR's merge re-fires this workflow.
+Convergence contract: after **any** merge lands on `origin/main` — factory auto-merge, local merge + push, GitHub UI — production converges to that SHA within ≤15 minutes.
 
-The full workflow lives at `.github/workflows/deploy.yml`. The shape comes from `agent-fabric`'s template at `examples/github-actions/deploy.yml`.
+1. **Every 15 min** (and instantly after a factory-performed merge) the reconciler compares `origin/main` against the SHA in `/var/lib/teach-me-eng-bot/deploy.json`.
+2. On drift it SSHes to the host and runs one chain: `git fetch/checkout main/pull --ff-only` (gitignored `.env`, `data/`, `.venv/`, `logs/` are untouched).
+3. **Conditional dependency refresh**: `requirements.txt` sha256 is compared against `/var/lib/teach-me-eng-bot/requirements.sha256`; on change, `.venv/bin/pip install -r requirements.txt`.
+4. `systemctl restart teach-me-eng-bot.service` (non-blocking).
+5. **Health probe** (from the factory host, one retry): `systemctl is-active` + git/disk/journal checks via `scripts/teach_me_eng_vps_health.py`.
+6. **On success** — the deploy chain wrote `/var/lib/teach-me-eng-bot/deploy.json` (`{sha, short_sha, deployed_at, deployer}`).
+7. **On failure** — a self-healing incident is filed once per SHA (GitHub issue + release-diagnoser task) and an ACTION-NEEDED line lands in the project's Telegram topic; after 2 failed attempts the reconciler holds until `main` moves (no silent retry loops, no auto-rollback — the previous version keeps running until a fix-PR lands).
 
 ## Known failure modes
 
@@ -100,7 +100,7 @@ A grab-bag of failures that have happened or are easy to imagine. The diagnose s
 | `telegram.error.InvalidToken` or `Unauthorized` at startup | `TELEGRAM_TOKEN` empty / rotated / pointed at the wrong bot | Re-fetch from `@BotFather`, update `/root/teach-me-eng-bot/.env`, `systemctl restart`. |
 | `ConnectionError` to `127.0.0.1:8080` early in journal | `LLM_BACKEND=llama` (default) but no local LLM running | Either start the local LLM, or set `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY` in `.env`. |
 | `httpx.HTTPStatusError 401` from OpenRouter at first chat | `OPENROUTER_API_KEY` rotated or empty | Refresh the key on openrouter.ai, update `.env`, `systemctl restart`. |
-| `ModuleNotFoundError: <package>` at startup | `requirements.txt` updated but `.venv` not refreshed | The deploy workflow's hash-compare should catch this — if it didn't, delete `/root/teach-me-eng-bot/.venv/.requirements.sha256` to force a rebuild on next deploy, OR `rm -rf .venv && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` manually. |
+| `ModuleNotFoundError: <package>` at startup | `requirements.txt` updated but `.venv` not refreshed | The reconciler's hash-compare should catch this — if it didn't, delete `/var/lib/teach-me-eng-bot/requirements.sha256` to force a refresh on the next deploy, OR `.venv/bin/pip install -r requirements.txt` manually. |
 | `sqlite3.OperationalError: no such table` | A code change references a table the schema doesn't have | Inspect `db.py::init_db()` — schema changes must be additive (CREATE TABLE IF NOT EXISTS, ALTER TABLE ADD COLUMN). DROP / rename are blocked by `safety.destructive_db_patterns` in `.fabric/config.yaml` and need explicit human override. |
 | `OSError: [Errno 28] No space left on device` | `data/`, `logs/`, or systemd journal filling the disk | `df -h /root` to confirm. The bot's transcripts in `logs/` grow unbounded; rotate. SQLite WAL can also balloon under heavy write — `sqlite3 data/vocab.db 'PRAGMA wal_checkpoint(TRUNCATE);'` releases it. |
 | Deploy succeeds but bot stops responding | The systemd unit may have started but failed to register webhooks / commands. Look for `telegram.error.NetworkError` or `Conflict: terminated by other getUpdates request`. The latter means a second instance is competing for long-polling — verify only one `bot.py` process is running. |
@@ -114,6 +114,6 @@ A grab-bag of failures that have happened or are easy to imagine. The diagnose s
 
 ## Dark Factory operations
 
-Hermes Dark Factory monitors this deployment as project `teach-me-eng-bot`. The factory may inspect service health, Git state, disk usage, and recent journal output via SSH, and may perform bounded recovery (`systemctl daemon-reload` + service restart) when the service is unhealthy.
+Hermes Dark Factory monitors AND deploys this project as `teach-me-eng-bot`. The factory may inspect service health, Git state, disk usage, and recent journal output via SSH, may perform bounded recovery (`systemctl daemon-reload` + service restart) when the service is unhealthy, and owns the deploy reconciler described above.
 
 Human approval is required before changing `.env`, service definitions, GitHub Actions deploy logic, destructive data operations, or deployment infrastructure.
