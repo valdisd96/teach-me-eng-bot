@@ -47,7 +47,7 @@ Per-chat scheduling settings (timezone, pushes-per-day, active window, tone) are
 | Command | Purpose |
 |---|---|
 | `/start` | Walks a guided config: timezone → words per daily story (4–10) → active window (HH:MM) → tone (funny/motivational/scary/bright/mixed) → target language (for `/tr`). Overwrites previous settings; vocab is preserved. The words count is stored in the legacy `pushes_per_day` DB column. |
-| `/help` | Shows a getting-started intro and lists all commands with descriptions. |
+| `/help` | Shows a getting-started intro, an "Answering the daily story" section (grading tolerance, `skip`, ungraded stray text, worked example), and lists all commands with descriptions. |
 | `/clear` | Resets the chat history (LLM memory) for this chat. Vocab and settings untouched. |
 | `/add <word or phrase>` | Add a word to this chat's vocab. Normalized to lowercased+stripped form. New single words are spell-checked against a plain dictionary (`spelling.suggest`, pyspellchecker — no LLM per issue #101): a misspelling gets a `did you mean "…"?` reply with two inline buttons (add the correction / add as typed, both via the `av:` pending-vocab flow) instead of an immediate insert; phrases, non-alphabetic tokens, already-present words, and checker failures skip the check. Labels are managed manually via `/label` / `/unlabel` or in bulk by uploading a labelled CSV through `/import`. |
 | `/remove <word or phrase>` | Remove by exact (normalized) match. |
