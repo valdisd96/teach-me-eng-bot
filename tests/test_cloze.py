@@ -117,16 +117,81 @@ def test_grade_answer_keeps_inner_apostrophe() -> None:
     assert cloze.grade_answer("didn't", "didnt") is False
 
 
-def test_classify_answer_tolerates_trailing_punctuation() -> None:
+def test_resolve_answers_tolerates_trailing_punctuation() -> None:
     s = _session(["cat"], "A cat sat.")
-    assert cloze.classify_answer("cat.", s) == "answer"
+    assert cloze.resolve_answers("cat.", s) == [
+        cloze.Answer(blank_index=0, text="cat.", is_skip=False)
+    ]
 
 
-def test_classify_answer_bare_question_mark_is_still_skip() -> None:
+def test_resolve_answers_bare_question_mark_is_still_skip() -> None:
     # "?" is checked on the raw text — the punctuation-tolerant normalizer
     # would strip it to "" and lose the skip intent.
     s = _session(["cat"], "A cat sat.")
-    assert cloze.classify_answer("?", s) == "skip"
+    assert cloze.resolve_answers("?", s) == [
+        cloze.Answer(blank_index=0, text="", is_skip=True)
+    ]
+
+
+def test_resolve_answers_numbered_targets_specific_blank() -> None:
+    s = _session(["alpha", "beta", "gamma"], "First alpha then beta then gamma.")
+    for text in ("2 beta", "2: beta", "2. beta", "2) beta"):
+        assert cloze.resolve_answers(text, s) == [
+            cloze.Answer(blank_index=1, text="beta", is_skip=False)
+        ], text
+
+
+def test_resolve_answers_numbered_skip() -> None:
+    s = _session(["alpha", "beta"], "First alpha then beta.")
+    assert cloze.resolve_answers("2 skip", s) == [
+        cloze.Answer(blank_index=1, text="", is_skip=True)
+    ]
+
+
+def test_resolve_answers_batch_fills_in_order() -> None:
+    s = _session(["alpha", "beta", "gamma"], "First alpha then beta then gamma.")
+    assert cloze.resolve_answers("alpha, gamma, beta", s) == [
+        cloze.Answer(blank_index=0, text="alpha", is_skip=False),
+        cloze.Answer(blank_index=1, text="gamma", is_skip=False),
+        cloze.Answer(blank_index=2, text="beta", is_skip=False),
+    ]
+
+
+def test_resolve_answers_mixed_numbered_and_bare() -> None:
+    # `2 beta` claims blank 2, so the bare answer flows to the first
+    # still-free blank (1); skip works inside a batch.
+    s = _session(["alpha", "beta", "gamma"], "First alpha then beta then gamma.")
+    assert cloze.resolve_answers("2 beta, alpha, skip", s) == [
+        cloze.Answer(blank_index=1, text="beta", is_skip=False),
+        cloze.Answer(blank_index=0, text="alpha", is_skip=False),
+        cloze.Answer(blank_index=2, text="", is_skip=True),
+    ]
+
+
+def test_resolve_answers_rejects_whole_message_on_any_bad_segment() -> None:
+    s = _session(["alpha", "beta"], "First alpha then beta.")
+    # One stray segment poisons the batch — nothing may be graded.
+    assert cloze.resolve_answers("alpha, huh what", s) is None
+    assert cloze.resolve_answers("alpha, betaz", s) is None
+
+
+def test_resolve_answers_rejects_out_of_range_and_answered_targets() -> None:
+    s = _session(["alpha", "beta"], "First alpha then beta.")
+    assert cloze.resolve_answers("3 alpha", s) is None  # no blank (3)
+    assert cloze.resolve_answers("0 alpha", s) is None
+    assert cloze.resolve_answers("1 alpha, 1 beta", s) is None  # duplicate
+    cloze.apply_answer(s, 0, True)
+    assert cloze.resolve_answers("1 alpha", s) is None  # already answered
+
+
+def test_resolve_answers_rejects_more_words_than_open_blanks() -> None:
+    s = _session(["alpha", "beta"], "First alpha then beta.")
+    assert cloze.resolve_answers("alpha, beta, alpha", s) is None
+
+
+def test_resolve_answers_stray_text_is_none() -> None:
+    s = _session(["alpha"], "First alpha here.")
+    assert cloze.resolve_answers("hi, what does alpha mean??", s) is None
 
 
 # --- session state ----------------------------------------------------------------
@@ -136,13 +201,37 @@ def test_apply_answer_advances_and_tracks_wrong() -> None:
     s = _session(["alpha", "beta"], "First alpha then beta.")
     assert s.done is False
     assert s.current().word == "alpha"
-    cloze.apply_answer(s, True)
+    cloze.apply_answer(s, 0, True)
     assert s.score == 1 and s.wrong == []
     assert s.current().word == "beta"
-    cloze.apply_answer(s, False)
+    cloze.apply_answer(s, 1, False)
     assert s.done is True
     assert s.score == 1
     assert s.wrong == ["beta"]
+
+
+def test_apply_answer_out_of_order() -> None:
+    s = _session(["alpha", "beta", "gamma"], "First alpha then beta then gamma.")
+    cloze.apply_answer(s, 1, True)
+    assert s.remaining == [0, 2]
+    assert s.current().word == "alpha"  # lowest open blank
+    cloze.apply_answer(s, 2, False)
+    assert s.current().word == "alpha"
+    assert s.done is False
+    cloze.apply_answer(s, 0, True)
+    assert s.done is True
+    assert s.score == 2 and s.wrong == ["gamma"]
+
+
+def test_apply_answer_rejects_double_answer() -> None:
+    s = _session(["alpha", "beta"], "First alpha then beta.")
+    cloze.apply_answer(s, 0, True)
+    try:
+        cloze.apply_answer(s, 0, False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("answering the same blank twice must raise")
 
 
 # --- formatting ------------------------------------------------------------------
@@ -154,7 +243,7 @@ def test_format_session_message_contains_blanks_bank_and_prompt() -> None:
     assert "___(1)" in body and "___(2)" in body
     assert "Word bank:" in body
     assert "alpha" in body and "beta" in body
-    assert "blank (1)" in body
+    assert "Blanks left: (1), (2)" in body
     # No intro words → no 🆕 section.
     assert "🆕" not in body
 
@@ -177,8 +266,8 @@ def test_format_session_message_escapes_html() -> None:
 def test_format_result_shows_story_score_and_missed_translations() -> None:
     s = _session(["alpha", "beta"], "First alpha then beta.")
     s.blanks[1].translation = "бета"
-    cloze.apply_answer(s, True)
-    cloze.apply_answer(s, False)
+    cloze.apply_answer(s, 0, True)
+    cloze.apply_answer(s, 1, False)
     out = cloze.format_result(s)
     assert "<b>alpha</b>" in out and "<b>beta</b>" in out  # completed story, bolded
     assert "1/2" in out
@@ -192,7 +281,7 @@ def test_format_result_bolds_every_occurrence_with_bare_infinitive() -> None:
     # duplicate that was masked with an unnumbered blank.
     story = "She may run out of milk. He may run out of luck."
     s = _session(["to run out of"], story)
-    cloze.apply_answer(s, True)
+    cloze.apply_answer(s, 0, True)
     out = cloze.format_result(s)
     assert out.count("<b>run out of</b>") == 2, (
         f"both bare-form occurrences must be bolded; got {out!r}"
@@ -200,12 +289,21 @@ def test_format_result_bolds_every_occurrence_with_bare_infinitive() -> None:
 
 
 def test_format_answer_feedback() -> None:
-    assert cloze.format_answer_feedback(True, "alpha") == "✅ alpha"
-    assert cloze.format_answer_feedback(False, "alpha") == "❌ it was: alpha"
+    assert cloze.format_answer_feedback(1, True, "alpha") == "(1) ✅ alpha"
+    assert cloze.format_answer_feedback(3, False, "alpha") == "(3) ❌ it was: alpha"
 
 
-def test_format_blank_prompt_counts_from_one() -> None:
+def test_format_blank_prompt_lists_open_blanks_and_syntax() -> None:
+    s = _session(["alpha", "beta", "gamma"], "First alpha then beta then gamma.")
+    p = cloze.format_blank_prompt(s)
+    assert "(1), (2), (3)" in p
+    assert "`1 <word>`" in p and "skip" in p
+    cloze.apply_answer(s, 1, True)  # out-of-order: blank 2 answered first
+    p = cloze.format_blank_prompt(s)
+    assert "Blanks left: (1), (3)." in p
+
+
+def test_format_blank_prompt_single_open_blank_is_simple() -> None:
     s = _session(["alpha", "beta"], "First alpha then beta.")
-    assert "(1) of 2" in cloze.format_blank_prompt(s)
-    cloze.apply_answer(s, True)
+    cloze.apply_answer(s, 0, True)
     assert "(2) of 2" in cloze.format_blank_prompt(s)

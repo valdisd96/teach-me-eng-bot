@@ -28,18 +28,21 @@ def test_help_text_lists_every_command() -> None:
 
 
 def test_help_explains_story_answer_rules() -> None:
-    """/help must teach how blank answers are graded (skip, tolerance, example).
+    """/help must teach every accepted answer form with examples.
 
     The daily story grades typed answers with specific tolerance rules
-    (cloze.grade_answer / classify_answer); without them in /help users
-    can't know that `skip` exists or that stray text is never graded.
+    (cloze.grade_answer / resolve_answers); without them in /help users
+    can't know that `skip`, `4 dog` out-of-order targeting, or
+    comma-separated batches exist, or that stray text is never graded.
     """
     intro, _, _ = bot.HELP_TEXT.partition("*Commands*")
     assert "*Answering the daily story*" in intro
     assert "`skip`" in intro
     assert "word bank" in intro
-    # The concrete example blank must be present.
-    assert "___(1)" in intro
+    # Every accepted answer form must be shown as a concrete example.
+    assert "`4 dog`" in intro  # numbered, out-of-order
+    assert "`dog, run, cat`" in intro  # batch, in order
+    assert "`2 dog, 5 cat`" in intro  # numbered batch
 
 
 def test_commands_includes_import_and_export() -> None:
