@@ -291,7 +291,7 @@ def format_blank_prompt(session: Session) -> str:
         return f"✍️ Type the word for blank ({n}) of {session.n_blanks} (or `skip`)."
     left = ", ".join(f"({i + 1})" for i in rem)
     return (
-        f"✍️ Blanks left: {left}. Type the word for ({n}), `{n} <word>` "
+        f"✍️ Blanks left: {left}. Type the word for ({n}), `{n} &lt;word&gt;` "
         f"for a specific blank, several separated by commas, or `skip`."
     )
 

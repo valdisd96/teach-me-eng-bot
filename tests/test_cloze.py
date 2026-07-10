@@ -293,11 +293,11 @@ def test_format_answer_feedback() -> None:
     assert cloze.format_answer_feedback(3, False, "alpha") == "(3) ❌ it was: alpha"
 
 
-def test_format_blank_prompt_lists_open_blanks_and_syntax() -> None:
+def test_format_blank_prompt_lists_open_blanks_and_syntax_html_safe() -> None:
     s = _session(["alpha", "beta", "gamma"], "First alpha then beta then gamma.")
     p = cloze.format_blank_prompt(s)
     assert "(1), (2), (3)" in p
-    assert "`1 <word>`" in p and "skip" in p
+    assert "`1 &lt;word&gt;`" in p and "`1 <word>`" not in p and "skip" in p
     cloze.apply_answer(s, 1, True)  # out-of-order: blank 2 answered first
     p = cloze.format_blank_prompt(s)
     assert "Blanks left: (1), (3)." in p
