@@ -19,6 +19,8 @@ Default pipeline for issues and changes:
 
 Do not let the same agent be the only implementer and reviewer.
 
+Every code change must follow Git flow: isolated worktree/branch → tests → PR → independent review and required gates → merge to `main` → deploy from the merged `main` SHA. This has no hotfix exception: emergency, self-healing, one-line, and operator-authored fixes must never be committed or pushed directly to `main`.
+
 ## Commands
 
 Setup:

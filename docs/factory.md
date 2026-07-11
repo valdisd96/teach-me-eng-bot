@@ -21,6 +21,10 @@ The project starts at factory autonomy phase 1:
 - Low-risk docs/tests/small code changes may proceed through the pipeline and merge when all deterministic gates pass.
 - Protected or high-risk work is still planned, but irreversible actions require explicit human approval.
 
+## Git-flow invariant
+
+Every code change—including emergency hotfixes, incident recovery, self-healing fixes, one-line patches, and operator-authored changes—must use an isolated branch/worktree, tests, a pull request, independent review and required gates, merge to `main`, and deployment from the merged `main` SHA. Direct commits or pushes to `main` are never allowed; urgency may shorten the review cycle but cannot bypass the PR.
+
 ## Required gates
 
 Before PR:
